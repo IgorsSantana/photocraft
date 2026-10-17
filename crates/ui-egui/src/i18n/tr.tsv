@@ -3938,3 +3938,34 @@ cameraData	Lens	Lens
 	This document's layers: {needed} of {budget} for layers	Bu belgenin katmanları: katmanlar için {budget} içinden {needed}
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Bu belgenin katmanlarının {needed} belleğe ihtiyacı var ama en fazla {budget} kullanabilirler: tüm belgenin yeniden çizimi CPU'yu kullanır
 	GPU Memory (MB, 0 = Automatic)	GPU Belleği (MB, 0 = Otomatik)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	PDF İçe Aktar
+	The PDF is no longer available.	PDF artık kullanılamıyor.
+	The PDF is protected by a password.	PDF parola korumalı.
+	Password:	Parola:
+	Pages	Sayfalar
+	Images	Görüntüler
+	Select one or more images	Bir veya daha fazla görüntü seçin
+	{n} of {total} image(s) selected	{total} görüntüden {n} tanesi seçildi
+	{n} of {total} page(s) selected	{total} sayfadan {n} tanesi seçildi
+	Thumbnail Size:	Küçük Resim Boyutu:
+	Page Options	Sayfa Seçenekleri
+	Crop To:	Kırpma Alanı:
+	Image Size: --	Görüntü Boyutu: --
+	Image Size: {size}	Görüntü Boyutu: {size}
+	Constrain Proportions	Oranları Koru
+	Bit Depth:	Bit Derinliği:
+	Suppress Warnings	Uyarıları Gizle
+	Open In Reverse Order	Ters Sırada Aç
+	Fit Page	Sayfaya Sığdır
+	Bounding Box	Sınırlayıcı Kutu
+	Media Box	Ortam Kutusu
+	Crop Box	Kırpma Kutusu
+	Bleed Box	Taşma Payı Kutusu
+	Trim Box	Kesim Kutusu
+	Art Box	Resim Kutusu
+	That isn't the PDF's password.	Bu, PDF'nin parolası değil.
+	The PDF couldn't be read.	PDF okunamadı.
+	Select one or more pages.	Bir veya daha fazla sayfa seçin.
+	Select one or more images.	Bir veya daha fazla görüntü seçin.

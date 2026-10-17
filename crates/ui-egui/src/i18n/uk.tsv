@@ -3907,3 +3907,34 @@ curves	Smooth	Згладити
 	This document's layers: {needed} of {budget} for layers	Шари цього документа: {needed} з {budget} для шарів
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Шарам цього документа потрібно {needed}, але займати вони можуть {budget}: увесь документ перемальовується на CPU
 	GPU Memory (MB, 0 = Automatic)	Пам'ять GPU (МБ, 0 = автоматично)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	Імпорт PDF
+	The PDF is no longer available.	PDF більше недоступний.
+	The PDF is protected by a password.	PDF захищено паролем.
+	Password:	Пароль:
+	Pages	Сторінки
+	Images	Зображення
+	Select one or more images	Виберіть одне або кілька зображень
+	{n} of {total} image(s) selected	Вибрано зображень: {n} з {total}
+	{n} of {total} page(s) selected	Вибрано сторінок: {n} з {total}
+	Thumbnail Size:	Розмір мініатюр:
+	Page Options	Параметри сторінки
+	Crop To:	Обрізати за:
+	Image Size: --	Розмір зображення: --
+	Image Size: {size}	Розмір зображення: {size}
+	Constrain Proportions	Зберігати пропорції
+	Bit Depth:	Глибина кольору:
+	Suppress Warnings	Не показувати попередження
+	Open In Reverse Order	Відкривати у зворотному порядку
+	Fit Page	За розміром сторінки
+	Bounding Box	Обмежувальна рамка
+	Media Box	Межі носія
+	Crop Box	Область обрізання
+	Bleed Box	Область випуску під обріз
+	Trim Box	Область після обрізання
+	Art Box	Область ілюстрації
+	That isn't the PDF's password.	Це не пароль від цього PDF.
+	The PDF couldn't be read.	Не вдалося прочитати PDF.
+	Select one or more pages.	Виберіть одну або кілька сторінок.
+	Select one or more images.	Виберіть одне або кілька зображень.

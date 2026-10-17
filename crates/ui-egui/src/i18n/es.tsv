@@ -4170,3 +4170,34 @@ navigator	Zoom	Zoom
 	This document's layers: {needed} of {budget} for layers	Capas de este documento: {needed} de {budget} para capas
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Las capas de este documento necesitan {needed} pero pueden ocupar {budget}: los redibujados de todo el documento usan la CPU
 	GPU Memory (MB, 0 = Automatic)	Memoria de GPU (MB, 0 = Automático)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	Importar PDF
+	The PDF is no longer available.	El PDF ya no está disponible.
+	The PDF is protected by a password.	El PDF está protegido con contraseña.
+	Password:	Contraseña:
+	Pages	Páginas
+	Images	Imágenes
+	Select one or more images	Seleccione una o varias imágenes
+	{n} of {total} image(s) selected	{n} de {total} imagen(es) seleccionada(s)
+	{n} of {total} page(s) selected	{n} de {total} página(s) seleccionada(s)
+	Thumbnail Size:	Tamaño de miniatura:
+	Page Options	Opciones de página
+	Crop To:	Recortar a:
+	Image Size: --	Tamaño de imagen: --
+	Image Size: {size}	Tamaño de imagen: {size}
+	Constrain Proportions	Restringir proporciones
+	Bit Depth:	Profundidad de bits:
+	Suppress Warnings	Suprimir advertencias
+	Open In Reverse Order	Abrir en orden inverso
+	Fit Page	Ajustar a la página
+	Bounding Box	Cuadro delimitador
+	Media Box	Cuadro de medios
+	Crop Box	Cuadro de recorte
+	Bleed Box	Cuadro de sangrado
+	Trim Box	Cuadro de corte
+	Art Box	Cuadro de arte
+	That isn't the PDF's password.	Esa no es la contraseña del PDF.
+	The PDF couldn't be read.	No se pudo leer el PDF.
+	Select one or more pages.	Seleccione una o varias páginas.
+	Select one or more images.	Seleccione una o varias imágenes.

@@ -3816,3 +3816,34 @@ navigator	Zoom	Zvětšení
 	This document's layers: {needed} of {budget} for layers	Vrstvy tohoto dokumentu: {needed} z {budget} pro vrstvy
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Vrstvy tohoto dokumentu potřebují {needed}, ale mohou zabrat {budget}: překreslení celého dokumentu probíhá na CPU
 	GPU Memory (MB, 0 = Automatic)	Paměť GPU (MB, 0 = Automaticky)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	Importovat PDF
+	The PDF is no longer available.	PDF už není k dispozici.
+	The PDF is protected by a password.	PDF je chráněno heslem.
+	Password:	Heslo:
+	Pages	Stránky
+	Images	Obrázky
+	Select one or more images	Vyberte jeden nebo více obrázků
+	{n} of {total} image(s) selected	Vybráno obrázků: {n} z {total}
+	{n} of {total} page(s) selected	Vybráno stránek: {n} z {total}
+	Thumbnail Size:	Velikost miniatur:
+	Page Options	Volby stránky
+	Crop To:	Oříznout na:
+	Image Size: --	Velikost obrazu: --
+	Image Size: {size}	Velikost obrazu: {size}
+	Constrain Proportions	Zachovat proporce
+	Bit Depth:	Bitová hloubka:
+	Suppress Warnings	Potlačit varování
+	Open In Reverse Order	Otevřít v obráceném pořadí
+	Fit Page	Celá stránka
+	Bounding Box	Ohraničovací rámeček
+	Media Box	Rámeček média
+	Crop Box	Rámeček oříznutí
+	Bleed Box	Rámeček spadávky
+	Trim Box	Rámeček čistého formátu
+	Art Box	Rámeček grafiky
+	That isn't the PDF's password.	To není heslo tohoto PDF.
+	The PDF couldn't be read.	PDF se nepodařilo přečíst.
+	Select one or more pages.	Vyberte jednu nebo více stránek.
+	Select one or more images.	Vyberte jeden nebo více obrázků.

@@ -3210,3 +3210,34 @@ curves	Smooth	Glätten
 	This document's layers: {needed} of {budget} for layers	Ebenen dieses Dokuments: {needed} von {budget} für Ebenen
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Die Ebenen dieses Dokuments brauchen {needed}, dürfen aber {budget} belegen: Das ganze Dokument wird auf der CPU neu gezeichnet
 	GPU Memory (MB, 0 = Automatic)	GPU-Speicher (MB, 0 = Automatisch)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	PDF importieren
+	The PDF is no longer available.	Die PDF-Datei ist nicht mehr verfügbar.
+	The PDF is protected by a password.	Die PDF-Datei ist durch ein Kennwort geschützt.
+	Password:	Kennwort:
+	Pages	Seiten
+	Images	Bilder
+	Select one or more images	Wählen Sie ein oder mehrere Bilder aus
+	{n} of {total} image(s) selected	{n} von {total} Bild(ern) ausgewählt
+	{n} of {total} page(s) selected	{n} von {total} Seite(n) ausgewählt
+	Thumbnail Size:	Miniaturgröße:
+	Page Options	Seitenoptionen
+	Crop To:	Beschneiden auf:
+	Image Size: --	Bildgröße: --
+	Image Size: {size}	Bildgröße: {size}
+	Constrain Proportions	Proportionen beibehalten
+	Bit Depth:	Bittiefe:
+	Suppress Warnings	Warnungen unterdrücken
+	Open In Reverse Order	In umgekehrter Reihenfolge öffnen
+	Fit Page	Ganze Seite
+	Bounding Box	Begrenzungsrahmen
+	Media Box	Medienrahmen
+	Crop Box	Maskenrahmen
+	Bleed Box	Anschnittrahmen
+	Trim Box	Endformatrahmen
+	Art Box	Objektrahmen
+	That isn't the PDF's password.	Das ist nicht das Kennwort der PDF-Datei.
+	The PDF couldn't be read.	Die PDF-Datei konnte nicht gelesen werden.
+	Select one or more pages.	Wählen Sie eine oder mehrere Seiten aus.
+	Select one or more images.	Wählen Sie ein oder mehrere Bilder aus.

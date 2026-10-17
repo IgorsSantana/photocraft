@@ -3200,3 +3200,34 @@ curves	Smooth	Haluskan
 	This document's layers: {needed} of {budget} for layers	Layer dokumen ini: {needed} dari {budget} untuk layer
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Layer dokumen ini membutuhkan {needed} tetapi boleh memakai {budget}: penggambaran ulang seluruh dokumen memakai CPU
 	GPU Memory (MB, 0 = Automatic)	Memori GPU (MB, 0 = Otomatis)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	Impor PDF
+	The PDF is no longer available.	PDF tidak lagi tersedia.
+	The PDF is protected by a password.	PDF dilindungi kata sandi.
+	Password:	Kata sandi:
+	Pages	Halaman
+	Images	Gambar
+	Select one or more images	Pilih satu gambar atau lebih
+	{n} of {total} image(s) selected	{n} dari {total} gambar dipilih
+	{n} of {total} page(s) selected	{n} dari {total} halaman dipilih
+	Thumbnail Size:	Ukuran Gambar Mini:
+	Page Options	Opsi Halaman
+	Crop To:	Pangkas ke:
+	Image Size: --	Ukuran Gambar: --
+	Image Size: {size}	Ukuran Gambar: {size}
+	Constrain Proportions	Pertahankan Proporsi
+	Bit Depth:	Kedalaman Bit:
+	Suppress Warnings	Sembunyikan Peringatan
+	Open In Reverse Order	Buka dalam Urutan Terbalik
+	Fit Page	Pas Halaman
+	Bounding Box	Kotak Pembatas
+	Media Box	Kotak Media
+	Crop Box	Kotak Pangkas
+	Bleed Box	Kotak Bleed
+	Trim Box	Kotak Trim
+	Art Box	Kotak Seni
+	That isn't the PDF's password.	Itu bukan kata sandi PDF ini.
+	The PDF couldn't be read.	PDF tidak dapat dibaca.
+	Select one or more pages.	Pilih satu halaman atau lebih.
+	Select one or more images.	Pilih satu gambar atau lebih.

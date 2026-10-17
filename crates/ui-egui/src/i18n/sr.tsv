@@ -4281,3 +4281,34 @@ shape	Appearance	Izgled
 	This document's layers: {needed} of {budget} for layers	Slojevi ovog dokumenta: {needed} od {budget} za slojeve
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Slojevima ovog dokumenta treba {needed}, a smeju da zauzmu {budget}: ceo dokument se ponovo iscrtava na CPU-u
 	GPU Memory (MB, 0 = Automatic)	GPU memorija (MB, 0 = Automatski)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	Uvezi PDF
+	The PDF is no longer available.	PDF više nije dostupan.
+	The PDF is protected by a password.	PDF je zaštićen lozinkom.
+	Password:	Lozinka:
+	Pages	Stranice
+	Images	Slike
+	Select one or more images	Izaberite jednu ili više slika
+	{n} of {total} image(s) selected	Izabrano slika: {n} od {total}
+	{n} of {total} page(s) selected	Izabrano stranica: {n} od {total}
+	Thumbnail Size:	Veličina sličica:
+	Page Options	Opcije stranice
+	Crop To:	Iseci na:
+	Image Size: --	Veličina slike: --
+	Image Size: {size}	Veličina slike: {size}
+	Constrain Proportions	Zadrži proporcije
+	Bit Depth:	Dubina bita:
+	Suppress Warnings	Sakrij upozorenja
+	Open In Reverse Order	Otvori obrnutim redosledom
+	Fit Page	Cela stranica
+	Bounding Box	Granični okvir
+	Media Box	Okvir medija
+	Crop Box	Okvir isecanja
+	Bleed Box	Okvir napusta
+	Trim Box	Okvir obrezivanja
+	Art Box	Okvir grafike
+	That isn't the PDF's password.	To nije lozinka ovog PDF-a.
+	The PDF couldn't be read.	PDF nije moguće pročitati.
+	Select one or more pages.	Izaberite jednu ili više stranica.
+	Select one or more images.	Izaberite jednu ili više slika.

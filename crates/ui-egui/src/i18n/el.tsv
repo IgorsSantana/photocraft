@@ -3908,3 +3908,34 @@ curves	Smooth	Εξομάλυνση
 	This document's layers: {needed} of {budget} for layers	Επίπεδα αυτού του εγγράφου: {needed} από {budget} για επίπεδα
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Τα επίπεδα αυτού του εγγράφου χρειάζονται {needed} αλλά μπορούν να καταλάβουν {budget}: η επανασχεδίαση όλου του εγγράφου γίνεται στη CPU
 	GPU Memory (MB, 0 = Automatic)	Μνήμη GPU (MB, 0 = Αυτόματο)
+
+# Import PDF (File › Open on a PDF, as Photoshop's dialog)
+	Import PDF	Εισαγωγή PDF
+	The PDF is no longer available.	Το PDF δεν είναι πλέον διαθέσιμο.
+	The PDF is protected by a password.	Το PDF προστατεύεται με κωδικό πρόσβασης.
+	Password:	Κωδικός πρόσβασης:
+	Pages	Σελίδες
+	Images	Εικόνες
+	Select one or more images	Επιλέξτε μία ή περισσότερες εικόνες
+	{n} of {total} image(s) selected	Επιλεγμένες εικόνες: {n} από {total}
+	{n} of {total} page(s) selected	Επιλεγμένες σελίδες: {n} από {total}
+	Thumbnail Size:	Μέγεθος μικρογραφιών:
+	Page Options	Επιλογές σελίδας
+	Crop To:	Περικοπή σε:
+	Image Size: --	Μέγεθος εικόνας: --
+	Image Size: {size}	Μέγεθος εικόνας: {size}
+	Constrain Proportions	Διατήρηση αναλογιών
+	Bit Depth:	Βάθος bit:
+	Suppress Warnings	Απόκρυψη προειδοποιήσεων
+	Open In Reverse Order	Άνοιγμα με αντίστροφη σειρά
+	Fit Page	Προσαρμογή στη σελίδα
+	Bounding Box	Πλαίσιο οριοθέτησης
+	Media Box	Πλαίσιο μέσου
+	Crop Box	Πλαίσιο περικοπής
+	Bleed Box	Πλαίσιο ξακρίσματος
+	Trim Box	Πλαίσιο αποκοπής
+	Art Box	Πλαίσιο γραφικών
+	That isn't the PDF's password.	Αυτός δεν είναι ο κωδικός του PDF.
+	The PDF couldn't be read.	Δεν ήταν δυνατή η ανάγνωση του PDF.
+	Select one or more pages.	Επιλέξτε μία ή περισσότερες σελίδες.
+	Select one or more images.	Επιλέξτε μία ή περισσότερες εικόνες.
