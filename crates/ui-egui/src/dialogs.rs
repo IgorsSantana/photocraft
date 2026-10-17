@@ -688,7 +688,8 @@ pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
     app.filter_preview = None;
     app.color_range = None;
     if crate::pdf_import_ui::owns(&closed.fields) {
-        app.pdf_import = None;
+        // Only this dialog's file goes; another PDF's dialog keeps its own.
+        crate::pdf_import_ui::forget(app, id);
     }
     crate::type_panels_ui::color_picker::prune(app);
     Ok(Value::Null)

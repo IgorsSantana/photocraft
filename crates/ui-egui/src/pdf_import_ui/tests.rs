@@ -100,7 +100,7 @@ fn opening_a_pdf_shows_the_dialog_with_photoshop_defaults() {
     assert_eq!(f.get("suppressWarnings"), Some(&json!(false)));
     assert_eq!(f.get("reverseOrder"), Some(&json!(true)));
     assert_eq!(f.get("thumbnailSize"), Some(&json!("small")));
-    let st = app.pdf_import.as_ref().expect("the file is held");
+    let st = app.pdf_import.first().expect("the file is held");
     assert_eq!(st.info.as_ref().map(|i| i.pages.len()), Some(3));
     assert_eq!(st.path.as_deref(), Some("/tmp/pc-test/multi.pdf"));
 }
@@ -115,7 +115,7 @@ fn ok_opens_the_selected_pages_in_reverse_order_as_unsaved_documents() {
     set(&mut app, "crop", json!("mediaBox"));
     let r = crate::dialogs::confirm(&mut app, id).expect("OK");
     assert_eq!(r.get("opened"), Some(&json!(3)));
-    assert!(dialog(&app).is_none() && app.pdf_import.is_none());
+    assert!(dialog(&app).is_none() && app.pdf_import.is_empty());
     let names: Vec<&str> = app.session.documents().iter().map(|d| d.doc.name.as_str()).collect();
     assert_eq!(names, ["multi-3.pdf", "multi-2.pdf", "multi-1.pdf"], "last page first, so page 1 ends up on top");
     let active = app.session.active().expect("a document");
@@ -165,7 +165,52 @@ fn cancel_opens_nothing_and_lets_the_file_go() {
     let id = dialog(&app).unwrap().id;
     crate::dialogs::cancel(&mut app, id).expect("cancel");
     assert!(app.session.documents().is_empty());
-    assert!(app.pdf_import.is_none() && dialog(&app).is_none());
+    assert!(app.pdf_import.is_empty() && dialog(&app).is_none());
+}
+
+/// Two PDFs opened together (Open with both selected, a drop, the command line) each keep their
+/// own file behind their own dialog: OK on either opens that file, Cancel on one leaves the other.
+#[test]
+fn two_pdfs_keep_their_own_dialogs_and_files() {
+    let a = pdf(&[(100.0, 80.0, "1 0 0 rg 0 0 100 80 re f")]);
+    let b = pdf(&[(60.0, 40.0, "0 0 1 rg 0 0 60 40 re f")]);
+    let open_both = |app: &mut PhotocraftApp| {
+        app.open_file("/tmp/pc-test/a.pdf", &a).expect("open a");
+        app.open_file("/tmp/pc-test/b.pdf", &b).expect("open b");
+        let ids: Vec<u64> = app.ui.dialogs.iter().filter(|d| owns(&d.fields)).map(|d| d.id).collect();
+        assert_eq!((ids.len(), app.pdf_import.len()), (2, 2), "a dialog and a held file each");
+        assert_eq!(app.pdf_import.iter().map(|st| st.file_name.as_str()).collect::<Vec<_>>(), ["a.pdf", "b.pdf"]);
+        for id in &ids {
+            app.ui.dialog_mut(*id).unwrap().fields.insert("resolution".into(), json!(72.0));
+        }
+        (ids[0], ids[1])
+    };
+    let opened = |app: &PhotocraftApp| -> Vec<(String, u32, u32, Vec<f32>)> {
+        app.session
+            .documents()
+            .iter()
+            .map(|d| (d.doc.name.clone(), d.doc.size.width, d.doc.size.height, d.doc.layers[0].surface().unwrap().pixel(5, 5)))
+            .collect()
+    };
+    // B's dialog first: B's file, by name and content; A's dialog and file stay.
+    let mut app = app();
+    let (da, db) = open_both(&mut app);
+    let r = crate::dialogs::confirm(&mut app, db).expect("OK on b");
+    assert_eq!(r.get("opened"), Some(&json!(1)));
+    assert_eq!(opened(&app), [("b".to_string(), 60, 40, vec![0.0, 0.0, 1.0, 1.0])]);
+    assert_eq!(app.pdf_import.iter().map(|st| st.dialog).collect::<Vec<_>>(), [da], "a's file is still held, for a's dialog");
+    assert!(app.ui.dialogs.iter().any(|d| d.id == da));
+    crate::dialogs::confirm(&mut app, da).expect("OK on a");
+    assert_eq!(opened(&app).last().map(|d| (d.0.as_str(), d.1, d.2, d.3.clone())), Some(("a", 100, 80, vec![1.0, 0.0, 0.0, 1.0])));
+    assert!(app.pdf_import.is_empty() && dialog(&app).is_none());
+    // Cancel on one lets only its file go.
+    let mut app = self::app();
+    let (da, db) = open_both(&mut app);
+    crate::dialogs::cancel(&mut app, da).expect("cancel a");
+    assert_eq!(app.pdf_import.iter().map(|st| st.dialog).collect::<Vec<_>>(), [db]);
+    crate::dialogs::confirm(&mut app, db).expect("OK on b");
+    assert_eq!(opened(&app), [("b".to_string(), 60, 40, vec![0.0, 0.0, 1.0, 1.0])]);
+    assert!(app.pdf_import.is_empty());
 }
 
 #[test]
@@ -179,7 +224,7 @@ fn ok_with_nothing_selected_keeps_the_dialog_up() {
     assert!(app.session.documents().is_empty());
     let d = dialog(&app).expect("still up");
     assert!(d.fields.get("__error").is_some());
-    assert!(app.pdf_import.is_some());
+    assert_eq!(app.pdf_import.len(), 1);
 }
 
 #[test]
@@ -267,6 +312,6 @@ fn the_dialog_draws_its_controls() {
         assert!(h.query_by_label(label).is_some(), "missing {label}");
     }
     // The thumbnails were rendered.
-    let st = h.state().pdf_import.as_ref().expect("held");
+    let st = h.state().pdf_import.first().expect("held");
     assert!(st.thumbs.iter().all(Option::is_some), "every page has its thumbnail");
 }

@@ -55,6 +55,16 @@ pub const MAX_SIDE: u32 = 16_384;
 /// Most pixels a page opens with (a Letter page at 1200 ppi is 135 MP); past it the page is
 /// scaled down, with a warning.
 pub const MAX_PAGE_PIXELS: u64 = 64_000_000;
+/// Most pixels one raster image, stencil, soft mask or explicit mask of a page may decode to,
+/// as the file declares its size: an image past it refuses the page before anything is decoded.
+pub const MAX_IMAGE_PIXELS: u64 = MAX_PAGE_PIXELS;
+/// Most pixels every image a page's resources reach may decode to together (the interpreter
+/// keeps decoded images while the page renders).
+pub const MAX_PAGE_IMAGE_PIXELS: u64 = 4 * MAX_PAGE_PIXELS;
+/// Most XObjects a page's resource tree is walked through before it is refused as unboundable.
+const MAX_XOBJECTS: usize = 10_000;
+/// Deepest nesting of Form XObjects the walk follows.
+const MAX_FORM_DEPTH: usize = 32;
 /// The resolution the dialog starts at, as Photoshop's.
 pub const DEFAULT_RESOLUTION: f32 = 300.0;
 /// The resolution range the dialog accepts.
@@ -290,6 +300,8 @@ pub fn thumbnail(bytes: &[u8], page: usize, max_side: u32, password: Option<&str
     let k = max_side.clamp(1, 2048) as f32 / dw.max(dh).max(1.0e-3);
     let side = |v: f32| ((v * k).round() as u32).clamp(1, 2048);
     let (w, h) = (side(dw), side(dh));
+    // A small thumbnail still decodes the page's images at their own size: within budget first.
+    preflight(p)?;
     let rgba = render_page(p, info.crop, info.rotation, (w, h), true);
     Ok(Thumbnail { width: w, height: h, rgba })
 }
@@ -313,6 +325,8 @@ fn import_pdf_inner(name: &str, bytes: &[u8], opts: &PdfOpenOptions, ctl: &Inter
     let page = page_of(&pdf, opts.page)?;
     let mut warnings = Vec::new();
     ctl.progress(0.05);
+    // Every image the page can decode is sized from the file before any of it is decoded.
+    preflight(page)?;
     // A one-page PDF that is nothing but one picture opens as that picture.
     if count == 1
         && let Some(document) = image_only(name, page)?
@@ -417,6 +431,8 @@ pub fn import_image(name: &str, bytes: &[u8], index: usize, chosen: Option<&str>
         let n = marks(page, None).images.len();
         if index > seen && index <= seen + n {
             ctl.progress(0.3);
+            // The one image decodes only within the page's budgets.
+            preflight(page)?;
             let placed = marks(page, Some(index - seen - 1)).images.into_iter().nth(index - seen - 1);
             let doc = placed
                 .and_then(|p| image_document(&image_name(name, chosen, index), &p))
@@ -545,7 +561,8 @@ fn oriented(bx: [f32; 4], rotation: u16) -> Affine {
 }
 
 /// Box `bx` of `page` rendered into `w × h` pixels, straight-alpha RGBA, transparent where the
-/// page paints nothing.
+/// page paints nothing. Callers run [`preflight`] first: rendering decodes the page's images at
+/// the size the file declares, whatever `w × h`.
 fn render_page(page: &Page, bx: [f32; 4], rotation: u16, (w, h): (u32, u32), anti_alias: bool) -> Vec<u8> {
     let (w, h) = (w.clamp(1, MAX_SIDE), h.clamp(1, MAX_SIDE));
     let (bw, bh) = (f64::from(bx[2] - bx[0]).max(1.0e-6), f64::from(bx[3] - bx[1]).max(1.0e-6));
@@ -592,6 +609,95 @@ fn pixels(rgba: &[u8], mode: ColorMode) -> Result<Vec<f32>, IoError> {
     Ok(out)
 }
 
+// --------------------------------------------------------------------------------- budgets
+
+/// Whether an image the file declares as `w × h` px may be decoded at all.
+fn image_fits(w: u32, h: u32) -> bool {
+    w > 0 && h > 0 && w <= MAX_SIDE && h <= MAX_SIDE && u64::from(w) * u64::from(h) <= MAX_IMAGE_PIXELS
+}
+
+fn image_error(what: &str, w: u32, h: u32) -> IoError {
+    IoError::Pdf(format!("PDF: {what} of {w} × {h} px is past the {MAX_SIDE} px / {} MP limit, so the page can't be opened", MAX_IMAGE_PIXELS / 1_000_000))
+}
+
+/// The `/Width × /Height` an image stream declares (`/W`, `/H` in an inline image).
+fn declared_size(dict: &hayro::hayro_syntax::object::Dict<'_>) -> Option<(u32, u32)> {
+    let w = dict.get::<u32>(b"Width").or_else(|| dict.get::<u32>(b"W"))?;
+    let h = dict.get::<u32>(b"Height").or_else(|| dict.get::<u32>(b"H"))?;
+    Some((w, h))
+}
+
+/// Refuses a page whose images couldn't be decoded within the budgets, before anything is
+/// decoded or rendered (the decoders would otherwise build each image at the size the file
+/// declares, however small the output asked for). Walked without decoding: every image XObject
+/// the page's resources reach, through Form XObjects, with its soft mask and explicit mask; then
+/// everything the content places, inline images and stencils included. Refused: an image past
+/// [`MAX_IMAGE_PIXELS`] or [`MAX_SIDE`] on a side, a page whose images pass
+/// [`MAX_PAGE_IMAGE_PIXELS`] together, an image that doesn't declare its size (its decode can't
+/// be bounded), and a resource tree too deep or too large to walk.
+fn preflight(page: &Page) -> Result<(), IoError> {
+    use hayro::hayro_syntax::object::{Dict, Name, Stream};
+    let mut total: u64 = 0;
+    let mut seen = 0usize;
+    let mut within = |w: u32, h: u32, what: &str| -> Result<(), IoError> {
+        if !image_fits(w, h) {
+            return Err(image_error(what, w, h));
+        }
+        total = total.saturating_add(u64::from(w) * u64::from(h));
+        if total > MAX_PAGE_IMAGE_PIXELS {
+            return Err(IoError::Pdf(format!(
+                "PDF: the page's images decode to more than {} MP together, so it can't be opened",
+                MAX_PAGE_IMAGE_PIXELS / 1_000_000
+            )));
+        }
+        Ok(())
+    };
+    let no_size = |what: &str| IoError::Pdf(format!("PDF: {what} doesn't declare its size, so its decoding can't be bounded; the page can't be opened"));
+    let mut stack: Vec<(Dict<'_>, usize)> = vec![(page.resources().x_objects.clone(), 0)];
+    while let Some((xobjects, depth)) = stack.pop() {
+        for name in xobjects.keys() {
+            seen += 1;
+            if seen > MAX_XOBJECTS {
+                return Err(IoError::Pdf(format!("PDF: more than {MAX_XOBJECTS} XObjects to check, so the page can't be opened")));
+            }
+            // Not a stream: the interpreter draws nothing for it.
+            let Some(stream) = xobjects.get::<Stream<'_>>(&name) else { continue };
+            let dict = stream.dict();
+            match dict.get::<Name<'_>>(b"Subtype").as_ref().map(AsRef::<[u8]>::as_ref) {
+                Some(b"Image") => {
+                    let (w, h) = declared_size(dict).ok_or_else(|| no_size("an image"))?;
+                    within(w, h, "an image")?;
+                    // A soft mask or an explicit mask is an image of its own size.
+                    for (key, what) in [(&b"SMask"[..], "a soft mask"), (&b"Mask"[..], "a mask")] {
+                        // `/Mask` may also be a colour-key array, which decodes nothing extra.
+                        if let Some(m) = dict.get::<Stream<'_>>(key) {
+                            let (mw, mh) = declared_size(m.dict()).ok_or_else(|| no_size(what))?;
+                            within(mw, mh, what)?;
+                        }
+                    }
+                }
+                Some(b"Form") => {
+                    if depth + 1 > MAX_FORM_DEPTH {
+                        return Err(IoError::Pdf(format!("PDF: Form XObjects nest deeper than {MAX_FORM_DEPTH}, so the page can't be opened")));
+                    }
+                    if let Some(x) = dict.get::<Dict<'_>>(b"Resources").and_then(|r| r.get::<Dict<'_>>(b"XObject")) {
+                        stack.push((x, depth + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // What the content places (inline images aren't in the resources): each within one image's
+    // budget. A placement decodes nothing here (see `Marks::draw_image`).
+    for (w, h) in marks(page, None).sizes {
+        if !image_fits(w, h) {
+            return Err(image_error("an image", w, h));
+        }
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------------------------- marks
 
 /// What a page draws, as a [`Device`]: the extent of every mark (clipped), counts per kind, and
@@ -605,6 +711,8 @@ struct Marks {
     /// Which raster image (by order of drawing) to decode; the others are only placed.
     decode: Option<usize>,
     images: Vec<Placed>,
+    /// The declared pixel size of every image and stencil placed, inline images included.
+    sizes: Vec<(u32, u32)>,
 }
 
 struct Placed {
@@ -641,7 +749,7 @@ impl Marks {
 /// Interprets `page` through a [`Marks`] device, in PDF points (y up); `decode` picks the raster
 /// image (by drawing order) whose pixels are wanted.
 fn marks(page: &Page, decode: Option<usize>) -> Marks {
-    let mut device = Marks { clips: Vec::new(), bounds: None, paths: 0, glyphs: 0, stencils: 0, decode, images: Vec::new() };
+    let mut device = Marks { clips: Vec::new(), bounds: None, paths: 0, glyphs: 0, stencils: 0, decode, images: Vec::new(), sizes: Vec::new() };
     let cache = InterpreterCache::new();
     let media = to_pt(norm(page.media_box()));
     let mut context = Context::new(Affine::IDENTITY, media, &cache, page.xref(), settings());
@@ -683,11 +791,13 @@ impl<'a> Device<'a> for Marks {
         // The transform places the image's own pixel grid (top row first).
         let (w, h) = (f64::from(image.width()), f64::from(image.height()));
         self.mark(props.transform.transform_rect_bbox(PtRect::new(0.0, 0.0, w, h)));
+        self.sizes.push((image.width(), image.height()));
         match image {
             Image::Stencil(_) => self.stencils = self.stencils.saturating_add(1),
             Image::Raster(r) => {
                 let mut decoded = None;
-                if self.decode == Some(self.images.len()) {
+                // Decoded only within the budget ([`preflight`] refused the page otherwise).
+                if self.decode == Some(self.images.len()) && image_fits(r.width(), r.height()) {
                     r.with_rgba(|data, alpha| decoded = Some((data, alpha)), None);
                 }
                 self.images.push(Placed { transform: props.transform, size: (r.width(), r.height()), decoded });

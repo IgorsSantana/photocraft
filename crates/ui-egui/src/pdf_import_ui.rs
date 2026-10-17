@@ -22,6 +22,9 @@ use crate::widgets;
 
 /// The field that marks a dialog as this module's.
 const FIELD: &str = "__pdfImport";
+/// The dialog's id in its fields: the held file is looked up by it, so several PDFs opened
+/// together (Open, a drop, the command line) each keep their own.
+const DIALOG: &str = "__pdfDialog";
 /// The dialog's width in points (Photoshop's is about 690 px).
 pub const WIDTH: f32 = 700.0;
 /// Thumbnail Size choices (field value, label).
@@ -80,6 +83,36 @@ pub fn owns(f: &Map<String, Value>) -> bool {
     f.contains_key(FIELD)
 }
 
+/// The id of the dialog `fields` belong to.
+fn dialog_of(f: &Map<String, Value>) -> Option<u64> {
+    f.get(DIALOG).and_then(Value::as_u64)
+}
+
+/// The held file of the dialog `fields` belong to, taken out of the app (put it back when the
+/// dialog stays up).
+fn take(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Option<PdfImport> {
+    let id = dialog_of(f)?;
+    let i = app.pdf_import.iter().position(|st| st.dialog == id)?;
+    Some(app.pdf_import.remove(i))
+}
+
+/// Opens `fields` as a new dialog and ties `st` to it: the held file follows the dialog.
+fn show(app: &mut PhotocraftApp, mut st: PdfImport, mut fields: Map<String, Value>) -> u64 {
+    fields.insert(DIALOG.into(), json!(0));
+    let id = app.ui.open_dialog(DialogKind::Command, fields);
+    if let Some(d) = app.ui.dialog_mut(id) {
+        d.fields.insert(DIALOG.into(), json!(id));
+    }
+    st.dialog = id;
+    app.pdf_import.push(st);
+    id
+}
+
+/// Lets the file held for dialog `id` go (the dialog was cancelled or closed).
+pub fn forget(app: &mut PhotocraftApp, id: u64) {
+    app.pdf_import.retain(|st| st.dialog != id);
+}
+
 /// Opens the dialog for the PDF `bytes` read from `path` (when known) as `name`. An encrypted
 /// file asks for its password first. Returns the dialog id.
 pub fn open(app: &mut PhotocraftApp, name: &str, path: Option<&str>, bytes: &[u8]) -> Result<u64, String> {
@@ -98,10 +131,9 @@ pub fn open(app: &mut PhotocraftApp, name: &str, path: Option<&str>, bytes: &[u8
         f.insert("password".into(), json!(""));
     }
     defaults(&mut f, app);
-    let dialog = app.ui.open_dialog(DialogKind::Command, f);
     let pages = info.as_ref().map_or(0, |i| i.pages.len());
-    app.pdf_import = Some(PdfImport {
-        dialog,
+    let st = PdfImport {
+        dialog: 0,
         file_name: name.to_string(),
         path: path.map(str::to_string),
         bytes,
@@ -113,8 +145,8 @@ pub fn open(app: &mut PhotocraftApp, name: &str, path: Option<&str>, bytes: &[u8
         thumb_key: String::new(),
         bounds: (0..pages).map(|_| None).collect(),
         anchor: None,
-    });
-    Ok(dialog)
+    };
+    Ok(show(app, st, f))
 }
 
 /// Photoshop's defaults: the first page, Bounding Box, anti-aliased, 300 ppi, RGB, 8 bits, the
@@ -298,17 +330,13 @@ fn render_thumbs(st: &mut PdfImport, ctx: &egui::Context, images: bool, size: &s
 /// The dialog body. Returns nothing: OK and Cancel are the frame's.
 pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
-    let Some(mut st) = app.pdf_import.take() else {
+    let Some(mut st) = take(app, f) else {
         ui.label(egui::RichText::new(tl!("The PDF is no longer available.")).color(t.danger));
         return;
     };
-    if st.dialog != app.ui.dialogs.last().map_or(st.dialog, |d| d.id) && !app.ui.dialogs.iter().any(|d| d.id == st.dialog) {
-        app.pdf_import = Some(st);
-        return;
-    }
     if flag(f, "__needsPassword", false) {
         password_body(ui, f, &t);
-        app.pdf_import = Some(st);
+        app.pdf_import.push(st);
         return;
     }
     let images = s(f, "select", "pages") == "images";
@@ -325,7 +353,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             right_column(ui, f, &mut st, &t, images);
         });
     });
-    app.pdf_import = Some(st);
+    app.pdf_import.push(st);
 }
 
 fn password_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, t: &Tokens) {
@@ -616,7 +644,7 @@ fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
 /// OK: with a password pending, try it (the dialog stays up with the pages on success, with the
 /// error otherwise); else open every selected page or image, each through the ordinary open path.
 pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
-    let Some(mut st) = app.pdf_import.take() else { return Err("no PDF is waiting to open".into()) };
+    let Some(mut st) = take(app, f) else { return Err("no PDF is waiting to open".into()) };
     if flag(f, "__needsPassword", false) {
         let pw = s(f, "password", "").to_string();
         let mut fields = f.clone();
@@ -638,9 +666,7 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
                 );
             }
         }
-        st.dialog = app.ui.open_dialog(DialogKind::Command, fields);
-        let id = st.dialog;
-        app.pdf_import = Some(st);
+        let id = show(app, st, fields);
         return Ok(json!({"dialog": id, "pending": true}));
     }
     let images = s(f, "select", "pages") == "images";
@@ -649,9 +675,7 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     if selected.is_empty() {
         let mut fields = f.clone();
         fields.insert("__error".into(), json!(if images { "Select one or more images." } else { "Select one or more pages." }));
-        st.dialog = app.ui.open_dialog(DialogKind::Command, fields);
-        let id = st.dialog;
-        app.pdf_import = Some(st);
+        let id = show(app, st, fields);
         return Ok(json!({"dialog": id, "pending": true}));
     }
     if !images && flag(f, "reverseOrder", true) {

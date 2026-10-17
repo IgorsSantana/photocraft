@@ -708,8 +708,8 @@ pub struct PhotocraftApp {
     pub(crate) redraws: std::collections::HashMap<photocraft_doc::DocId, background_redraw::Redraw>,
     /// Select › Color Range dialog preview (proxy document + mask / image textures).
     pub(crate) color_range: Option<color_range_ui::Preview>,
-    /// The PDF whose Import PDF dialog is up (`pdf_import_ui`).
-    pub(crate) pdf_import: Option<pdf_import_ui::PdfImport>,
+    /// The PDFs whose Import PDF dialogs are up, one per dialog (`pdf_import_ui`).
+    pub(crate) pdf_import: Vec<pdf_import_ui::PdfImport>,
     /// Image › Adjustments dialog preview through a temporary clipped adjustment layer.
     pub(crate) adjust_preview: Option<adjust_preview::AdjustPreview>,
     /// Synthetic input events queued by automation (`ui.click`, `ui.key`, …), injected next frame.
@@ -918,7 +918,7 @@ impl PhotocraftApp {
             filter_preview_worker: Default::default(),
             redraws: Default::default(),
             color_range: None,
-            pdf_import: None,
+            pdf_import: Vec::new(),
             adjust_preview: None,
             synthetic: Vec::new(),
             automation_input: false,

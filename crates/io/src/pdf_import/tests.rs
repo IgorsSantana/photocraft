@@ -454,3 +454,105 @@ fn plain_import_opens_pdfs_with_photoshop_defaults() {
     let r = crate::import_with_options("two.pdf", &bytes, &opts).unwrap();
     assert_eq!((r.document.name.as_str(), r.document.size.width), ("two-2.pdf", 36));
 }
+
+// ---- Image budgets: refused from the file's declarations, before anything is decoded. ----
+
+/// A one-page PDF whose objects 5.. are `xobjects` (dictionary text + a tiny Flate stream each);
+/// the first `named` of them are `/X0`, `/X1`… in the page's resources (the rest are reached
+/// only through the others, as masks or a form's resources), drawn by `content`.
+fn declared_pdf(xobjects: &[&str], named: usize, content: &str) -> Vec<u8> {
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(&[0u8; 16]).unwrap();
+    let data = enc.finish().unwrap();
+    let names: String = (0..xobjects.len().min(named)).map(|i| format!("/X{i} {} 0 R ", 5 + i)).collect();
+    let mut objs = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << {names} >> >> /Contents 4 0 R >>").into_bytes(),
+        stream("", content.as_bytes()),
+    ];
+    for x in xobjects {
+        objs.push(stream(x, &data));
+    }
+    write(objs)
+}
+
+const HUGE: &str = "/Type /XObject /Subtype /Image /Width 40000 /Height 40000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode";
+
+fn refused(bytes: &[u8], what: &str) -> String {
+    let e = import_pdf("big.pdf", bytes, &PdfOpenOptions::default(), &Interrupt::NONE).err().unwrap_or_else(|| panic!("{what}: opened")).to_string();
+    assert!(e.contains("can't be opened") || e.contains("can't be bounded"), "{what}: {e}");
+    e
+}
+
+#[test]
+fn an_oversized_image_refuses_the_page_before_decoding() {
+    // 40000 × 40000 px declared, 16 bytes of data: the decoders would build 1.6 GP.
+    let bytes = declared_pdf(&[HUGE], 1, "q 200 0 0 200 0 0 cm /X0 Do Q");
+    let e = refused(&bytes, "page");
+    assert!(e.contains("40000 × 40000"), "{e}");
+    assert!(thumbnail(&bytes, 1, 64, None).is_err(), "the thumbnail decodes the same image");
+    assert!(opens_as_image(&bytes, None), "it is a one-image page as far as the file says");
+    assert_eq!(images(&bytes, None).unwrap().len(), 1, "listing images decodes nothing");
+    assert!(import_image("big.pdf", &bytes, 1, None, None, &Interrupt::NONE).is_err(), "Images mode refuses it too");
+    assert!(image_thumbnail(&bytes, 1, 64, None).is_err());
+    // At the limit it is allowed by the declaration (the data then decides).
+    let edge = "/Type /XObject /Subtype /Image /Width 8000 /Height 8000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode";
+    assert!(preflight(page_of(&load(&declared_pdf(&[edge], 1, "q 200 0 0 200 0 0 cm /X0 Do Q"), None).unwrap(), 1).unwrap()).is_ok());
+}
+
+#[test]
+fn an_oversized_mask_or_a_nested_or_unsized_image_refuses_too() {
+    let small =
+        |mask: &str| format!("/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode {mask}");
+    // A soft mask of its own size (object 6, reached only through the image).
+    let e = refused(
+        &declared_pdf(
+            &[
+                &small("/SMask 6 0 R"),
+                "/Type /XObject /Subtype /Image /Width 40000 /Height 40000 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+            ],
+            1,
+            "q 200 0 0 200 0 0 cm /X0 Do Q",
+        ),
+        "soft mask",
+    );
+    assert!(e.contains("soft mask"), "{e}");
+    // An explicit mask.
+    let e = refused(
+        &declared_pdf(
+            &[&small("/Mask 6 0 R"), "/Type /XObject /Subtype /Image /Width 40000 /Height 40000 /ImageMask true /BitsPerComponent 1 /Filter /FlateDecode"],
+            1,
+            "q 200 0 0 200 0 0 cm /X0 Do Q",
+        ),
+        "mask",
+    );
+    assert!(e.contains("a mask"), "{e}");
+    // Inside a Form XObject's resources, even when the content draws nothing at all.
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /Im 6 0 R >> >>";
+    let e = refused(&declared_pdf(&[form, HUGE], 1, ""), "form");
+    assert!(e.contains("40000 × 40000"), "{e}");
+    // An image without its size can't be bounded.
+    let e = refused(
+        &declared_pdf(&["/Type /XObject /Subtype /Image /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode"], 1, "q 200 0 0 200 0 0 cm /X0 Do Q"),
+        "unsized",
+    );
+    assert!(e.contains("doesn't declare its size"), "{e}");
+    // Too many images for one page together.
+    let per = "/Type /XObject /Subtype /Image /Width 8000 /Height 8000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode";
+    let five = [per; 5];
+    let e = refused(&declared_pdf(&five, 5, "q 200 0 0 200 0 0 cm /X0 Do Q"), "total");
+    assert!(e.contains("together"), "{e}");
+    // An inline image: not in the resources, but placed.
+    let inline = "q 200 0 0 200 0 0 cm BI /W 40000 /H 40000 /CS /RGB /BPC 8 /F /Fl ID x EI Q";
+    let e = refused(&declared_pdf(&[], 0, inline), "inline");
+    assert!(e.contains("40000 × 40000"), "{e}");
+    // A normal image still opens, image-only.
+    let ok = declared_pdf(
+        &["/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode"],
+        1,
+        "q 200 0 0 200 0 0 cm /X0 Do Q",
+    );
+    let r = import_pdf("ok.pdf", &ok, &PdfOpenOptions::default(), &Interrupt::NONE).expect("opens");
+    assert_eq!((r.document.size.width, r.document.size.height), (2, 2));
+}
