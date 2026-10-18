@@ -28,15 +28,19 @@
 //! annotations are drawn; non-embedded fonts other than the standard 14 fall back to hayro's
 //! base-14 stand-ins; Anti-aliased off settles coverage and opacity under one half as out.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hayro::hayro_interpret::font::GlyphRun;
 use hayro::hayro_interpret::{
-    BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps, InterpreterCache, InterpreterSettings, LumaData, SoftMask,
-    interpret_page,
+    BlendMode, CacheKey, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps, InterpreterCache, InterpreterSettings, LumaData,
+    SoftMask, interpret_page,
 };
-use hayro::hayro_syntax::page::{Page, Rotation};
-use hayro::hayro_syntax::{LoadPdfError, Pdf};
+use hayro::hayro_syntax::content::TypedIter;
+use hayro::hayro_syntax::content::ops::TypedInstruction;
+use hayro::hayro_syntax::object::{Array, Dict, Name, Object, ObjectIdentifier, Stream};
+use hayro::hayro_syntax::page::{Page, Resources, Rotation};
+use hayro::hayro_syntax::{Filter, LoadPdfError, Pdf};
 use hayro::kurbo::{Affine, BezPath, Rect as PtRect, Shape};
 use hayro::vello_cpu::color::palette::css::TRANSPARENT;
 use hayro::vello_cpu::peniko::ImageAlphaType;
@@ -61,8 +65,12 @@ pub const MAX_IMAGE_PIXELS: u64 = MAX_PAGE_PIXELS;
 /// Most pixels every image a page's resources reach may decode to together (the interpreter
 /// keeps decoded images while the page renders).
 pub const MAX_PAGE_IMAGE_PIXELS: u64 = 4 * MAX_PAGE_PIXELS;
-/// Most XObjects a page's resource tree is walked through before it is refused as unboundable.
+/// Most streams (image and Form XObjects, tiling patterns, Type 3 glyph procedures, annotation
+/// appearances) a page's resource tree is walked through before it is refused as unboundable.
 const MAX_XOBJECTS: usize = 10_000;
+/// Most tiles a JPX codestream may split into: the decoder builds one structure per tile up
+/// front, whatever the image size (a 64 MP image in 256 px tiles has 1024).
+const MAX_JPX_TILES: u64 = 65_536;
 /// Deepest nesting of Form XObjects the walk follows.
 const MAX_FORM_DEPTH: usize = 32;
 /// The resolution the dialog starts at, as Photoshop's.
@@ -620,82 +628,428 @@ fn image_error(what: &str, w: u32, h: u32) -> IoError {
     IoError::Pdf(format!("PDF: {what} of {w} × {h} px is past the {MAX_SIDE} px / {} MP limit, so the page can't be opened", MAX_IMAGE_PIXELS / 1_000_000))
 }
 
+fn total_error() -> IoError {
+    IoError::Pdf(format!("PDF: the page's images decode to more than {} MP together, so it can't be opened", MAX_PAGE_IMAGE_PIXELS / 1_000_000))
+}
+
+fn no_size(what: &str) -> IoError {
+    IoError::Pdf(format!("PDF: {what} doesn't declare its size, so its decoding can't be bounded; the page can't be opened"))
+}
+
+fn unchecked_jpx(what: &str, why: &str) -> IoError {
+    IoError::Pdf(format!("PDF: {what} is a JPX image whose size can't be checked before decoding ({why}), so the page can't be opened"))
+}
+
 /// The `/Width × /Height` an image stream declares (`/W`, `/H` in an inline image).
-fn declared_size(dict: &hayro::hayro_syntax::object::Dict<'_>) -> Option<(u32, u32)> {
+fn declared_size(dict: &Dict<'_>) -> Option<(u32, u32)> {
     let w = dict.get::<u32>(b"Width").or_else(|| dict.get::<u32>(b"W"))?;
     let h = dict.get::<u32>(b"Height").or_else(|| dict.get::<u32>(b"H"))?;
     Some((w, h))
 }
 
-/// Refuses a page whose images couldn't be decoded within the budgets, before anything is
-/// decoded or rendered (the decoders would otherwise build each image at the size the file
-/// declares, however small the output asked for). Walked without decoding: every image XObject
-/// the page's resources reach, through Form XObjects, with its soft mask and explicit mask; then
-/// everything the content places, inline images and stencils included. Refused: an image past
-/// [`MAX_IMAGE_PIXELS`] or [`MAX_SIDE`] on a side, a page whose images pass
-/// [`MAX_PAGE_IMAGE_PIXELS`] together, an image that doesn't declare its size (its decode can't
-/// be bounded), and a resource tree too deep or too large to walk.
-fn preflight(page: &Page) -> Result<(), IoError> {
-    use hayro::hayro_syntax::object::{Dict, Name, Stream};
-    let mut total: u64 = 0;
-    let mut seen = 0usize;
-    let mut within = |w: u32, h: u32, what: &str| -> Result<(), IoError> {
-        if !image_fits(w, h) {
-            return Err(image_error(what, w, h));
+/// What a JPX (JPEG 2000) stream encodes, read from its headers without decoding: the image size
+/// and the number of components.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JpxHeader {
+    size: (u32, u32),
+    components: u16,
+}
+
+/// One image a stream decodes to, sized from the file without decoding: an image, or its soft
+/// mask or explicit mask, each an image of its own.
+#[derive(Clone, Debug)]
+struct Part {
+    what: &'static str,
+    /// The dictionary's `/Width × /Height`.
+    declared: (u32, u32),
+    /// For a `JPXDecode` stream, what its codestream encodes: the decoder builds that size,
+    /// whatever the dictionary declares.
+    encoded: Option<JpxHeader>,
+}
+
+impl Part {
+    /// The pixels decoding it builds: the larger of the declared and the encoded size, a JPX
+    /// image with more than four components counted once per four of them.
+    fn pixels(&self) -> u64 {
+        let declared = u64::from(self.declared.0) * u64::from(self.declared.1);
+        match self.encoded {
+            Some(j) => declared.max(u64::from(j.size.0) * u64::from(j.size.1) * u64::from(j.components).div_ceil(4).max(1)),
+            None => declared,
         }
-        total = total.saturating_add(u64::from(w) * u64::from(h));
-        if total > MAX_PAGE_IMAGE_PIXELS {
+    }
+
+    /// Refuses the part when decoding it alone would pass the per-image limits.
+    fn fits(&self) -> Result<(), IoError> {
+        let (w, h) = self.declared;
+        if !image_fits(w, h) {
+            return Err(image_error(self.what, w, h));
+        }
+        if let Some(j) = self.encoded
+            && (!image_fits(j.size.0, j.size.1) || self.pixels() > MAX_IMAGE_PIXELS)
+        {
             return Err(IoError::Pdf(format!(
-                "PDF: the page's images decode to more than {} MP together, so it can't be opened",
-                MAX_PAGE_IMAGE_PIXELS / 1_000_000
+                "PDF: {} of {w} × {h} px is a JPX image whose codestream encodes {} × {} px with {} component(s), past the {MAX_SIDE} px / {} MP limit, so the page can't be opened",
+                self.what,
+                j.size.0,
+                j.size.1,
+                j.components,
+                MAX_IMAGE_PIXELS / 1_000_000
             )));
         }
         Ok(())
+    }
+}
+
+/// Sizes one image stream without decoding it. For a `JPXDecode` stream the codestream header
+/// is read too, which needs JPXDecode to be the stream's one filter (behind another filter the
+/// bytes would have to be decoded first) and the header to parse; otherwise the image is refused,
+/// since its decoding can't be bounded.
+fn part_of(stream: &Stream<'_>, what: &'static str) -> Result<Part, IoError> {
+    let declared = declared_size(stream.dict()).ok_or_else(|| no_size(what))?;
+    let filters = stream.filters();
+    let encoded = if filters.contains(&Filter::JpxDecode) {
+        if filters.len() != 1 {
+            return Err(unchecked_jpx(what, "JPXDecode isn't its only filter"));
+        }
+        Some(jpx_header(&stream.raw_data()).map_err(|why| unchecked_jpx(what, why))?)
+    } else {
+        None
     };
-    let no_size = |what: &str| IoError::Pdf(format!("PDF: {what} doesn't declare its size, so its decoding can't be bounded; the page can't be opened"));
-    let mut stack: Vec<(Dict<'_>, usize)> = vec![(page.resources().x_objects.clone(), 0)];
-    while let Some((xobjects, depth)) = stack.pop() {
-        for name in xobjects.keys() {
-            seen += 1;
-            if seen > MAX_XOBJECTS {
-                return Err(IoError::Pdf(format!("PDF: more than {MAX_XOBJECTS} XObjects to check, so the page can't be opened")));
-            }
-            // Not a stream: the interpreter draws nothing for it.
-            let Some(stream) = xobjects.get::<Stream<'_>>(&name) else { continue };
-            let dict = stream.dict();
-            match dict.get::<Name<'_>>(b"Subtype").as_ref().map(AsRef::<[u8]>::as_ref) {
-                Some(b"Image") => {
-                    let (w, h) = declared_size(dict).ok_or_else(|| no_size("an image"))?;
-                    within(w, h, "an image")?;
-                    // A soft mask or an explicit mask is an image of its own size.
-                    for (key, what) in [(&b"SMask"[..], "a soft mask"), (&b"Mask"[..], "a mask")] {
-                        // `/Mask` may also be a colour-key array, which decodes nothing extra.
-                        if let Some(m) = dict.get::<Stream<'_>>(key) {
-                            let (mw, mh) = declared_size(m.dict()).ok_or_else(|| no_size(what))?;
-                            within(mw, mh, what)?;
-                        }
-                    }
-                }
-                Some(b"Form") => {
-                    if depth + 1 > MAX_FORM_DEPTH {
-                        return Err(IoError::Pdf(format!("PDF: Form XObjects nest deeper than {MAX_FORM_DEPTH}, so the page can't be opened")));
-                    }
-                    if let Some(x) = dict.get::<Dict<'_>>(b"Resources").and_then(|r| r.get::<Dict<'_>>(b"XObject")) {
-                        stack.push((x, depth + 1));
-                    }
-                }
-                _ => {}
-            }
+    Ok(Part { what, declared, encoded })
+}
+
+/// An image stream (an XObject or an inline image) with its soft mask and explicit mask, each
+/// sized from the file. `/Mask` may also be a colour-key array, which decodes nothing extra.
+fn image_parts(stream: &Stream<'_>, what: &'static str) -> Result<Vec<Part>, IoError> {
+    let mut parts = vec![part_of(stream, what)?];
+    for (key, what) in [(&b"SMask"[..], "a soft mask"), (&b"Mask"[..], "a mask")] {
+        if let Some(m) = stream.dict().get::<Stream<'_>>(key) {
+            parts.push(part_of(&m, what)?);
         }
     }
-    // What the content places (inline images aren't in the resources): each within one image's
-    // budget. A placement decodes nothing here (see `Marks::draw_image`).
-    for (w, h) in marks(page, None).sizes {
-        if !image_fits(w, h) {
-            return Err(image_error("an image", w, h));
+    Ok(parts)
+}
+
+fn be16(d: &[u8], at: usize) -> Option<u16> {
+    d.get(at..at + 2)?.try_into().ok().map(u16::from_be_bytes)
+}
+
+fn be32(d: &[u8], at: usize) -> Option<u32> {
+    d.get(at..at + 4)?.try_into().ok().map(u32::from_be_bytes)
+}
+
+fn be64(d: &[u8], at: usize) -> Option<u64> {
+    d.get(at..at + 8)?.try_into().ok().map(u64::from_be_bytes)
+}
+
+/// Reads what a JPX stream encodes from its headers, as `hayro_jpeg2000` reads them before it
+/// decodes: a raw codestream (the SOC marker, then the SIZ marker segment) or a JP2 file (boxes,
+/// the codestream in `jp2c` and an image header in `jp2h`/`ihdr`; the larger of the two sizes
+/// counts). `Err` says why it couldn't be read, so the image is refused rather than decoded.
+fn jpx_header(data: &[u8]) -> Result<JpxHeader, &'static str> {
+    const CODESTREAM: &[u8] = b"\xFF\x4F\xFF\x51";
+    const JP2: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
+    if let Some(siz) = data.strip_prefix(CODESTREAM) {
+        return siz_header(siz);
+    }
+    if !data.starts_with(JP2) {
+        return Err("neither a JPEG 2000 codestream nor a JP2 file");
+    }
+    let mut header = None;
+    let mut ihdr = None;
+    for (kind, body) in jp2_boxes(data) {
+        match &kind {
+            b"jp2h" => {
+                for (kind, body) in jp2_boxes(body) {
+                    if &kind == b"ihdr" {
+                        let (Some(h), Some(w)) = (be32(body, 0), be32(body, 4)) else { return Err("the JP2 image header is truncated") };
+                        ihdr = Some((w, h));
+                    }
+                }
+            }
+            b"jp2c" => {
+                let Some(siz) = body.strip_prefix(CODESTREAM) else { return Err("the JP2 codestream box doesn't hold a codestream") };
+                header = Some(siz_header(siz)?);
+            }
+            _ => {}
+        }
+    }
+    let Some(mut header) = header else { return Err("the JP2 file has no codestream box") };
+    if let Some((w, h)) = ihdr {
+        header.size = (header.size.0.max(w), header.size.1.max(h));
+    }
+    Ok(header)
+}
+
+/// The boxes of a JP2 file or superbox, `(type, contents)`: a 32-bit length (0: to the end; 1: a
+/// 64-bit length follows) and a four-byte type. Stops at a truncated box, as the decoder does.
+fn jp2_boxes(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut out = Vec::new();
+    while let (Some(len), Some(kind)) = (be32(data, 0), data.get(4..8).and_then(|k| <[u8; 4]>::try_from(k).ok())) {
+        let (start, end) = match len {
+            0 => (8, data.len()),
+            1 => match be64(data, 8).and_then(|l| usize::try_from(l).ok()) {
+                Some(end) => (16, end),
+                None => break,
+            },
+            n => (8, n as usize),
+        };
+        if end < start || end > data.len() {
+            break;
+        }
+        out.push((kind, &data[start..end]));
+        data = &data[end..];
+    }
+    out
+}
+
+/// The SIZ marker segment after its `FF 51` marker: Lsiz, Rsiz, the reference grid (Xsiz, Ysiz),
+/// the image origin on it (XOsiz, YOsiz), the tile size (XTsiz, YTsiz) and origin (XTOsiz,
+/// YTOsiz), then Csiz. The image is `(Xsiz − XOsiz) × (Ysiz − YOsiz)` px; the decoder also builds
+/// one structure per tile up front, so their number is bounded too.
+fn siz_header(siz: &[u8]) -> Result<JpxHeader, &'static str> {
+    let field = |i: usize| be32(siz, 4 + 4 * i);
+    let (Some(xsiz), Some(ysiz), Some(xosiz), Some(yosiz), Some(xtsiz), Some(ytsiz), Some(xtosiz), Some(ytosiz), Some(csiz)) =
+        (field(0), field(1), field(2), field(3), field(4), field(5), field(6), field(7), be16(siz, 36))
+    else {
+        return Err("the SIZ marker segment is truncated");
+    };
+    if xosiz >= xsiz || yosiz >= ysiz || csiz == 0 {
+        return Err("the SIZ marker segment is inconsistent");
+    }
+    if xtsiz == 0 || ytsiz == 0 || xtosiz > xosiz || ytosiz > yosiz {
+        return Err("the SIZ marker segment tiles the image inconsistently");
+    }
+    let tiles = u64::from(xsiz - xtosiz).div_ceil(u64::from(xtsiz)) * u64::from(ysiz - ytosiz).div_ceil(u64::from(ytsiz));
+    if tiles > MAX_JPX_TILES {
+        return Err("the codestream has more tiles than can be decoded within the budget");
+    }
+    Ok(JpxHeader { size: (xsiz - xosiz, ysiz - yosiz), components: csiz })
+}
+
+/// The pixels a page's images decode to together.
+#[derive(Default)]
+struct Budget {
+    total: u64,
+}
+
+impl Budget {
+    /// Charges an image with its masks, refusing a part past the per-image limits or a total past
+    /// the page's.
+    fn charge(&mut self, parts: &[Part]) -> Result<(), IoError> {
+        for p in parts {
+            p.fits()?;
+            self.total = self.total.saturating_add(p.pixels());
+        }
+        if self.total > MAX_PAGE_IMAGE_PIXELS { Err(total_error()) } else { Ok(()) }
+    }
+}
+
+/// Refuses a page whose images couldn't be decoded within the budgets, before anything is
+/// decoded or rendered (the decoders build each image at the size the file declares, or that its
+/// JPX codestream encodes, however small the output asked for). Nothing here decodes an image:
+///
+/// * the content is interpreted once through the [`Marks`] device, and every image it places
+///   (XObjects, inline images and stencils, through Form XObjects, Type 3 glyphs and annotation
+///   appearances) is charged once per drawing, as the renderer decodes an image every time it
+///   draws one; a raster image is sized from its own stream, a stencil (whose stream the
+///   interpreter doesn't show) from the walk below;
+/// * every image stream the page's resources reach is sized, drawn or not: `/XObject` images with
+///   their soft and explicit masks, through Form XObjects, tiling patterns, Type 3 glyph
+///   procedures, the groups of `/ExtGState` soft masks and annotation appearances, and the inline
+///   images in all those content streams; one the content never placed is charged once.
+///
+/// Refused: an image past [`MAX_IMAGE_PIXELS`] or [`MAX_SIDE`] on a side, a page whose images pass
+/// [`MAX_PAGE_IMAGE_PIXELS`] together, an image that doesn't declare its size, a JPX image whose
+/// codestream header can't be read (so its decoding can't be bounded), a stencil drawn from a
+/// stream the walk didn't reach, and a resource tree too deep or too large to walk.
+fn preflight(page: &Page) -> Result<(), IoError> {
+    let mut walk = Walk::default();
+    // What the content places, once per drawing.
+    let mut unsourced = Vec::new();
+    for p in marks(page, None).placements {
+        walk.placed.insert(p.key);
+        match p.parts {
+            Some(parts) => walk.budget.charge(&parts?)?,
+            None => unsourced.push((p.key, p.size)),
+        }
+    }
+    // What the resources reach, drawn or not.
+    walk.scan(page.typed_operations())?;
+    walk.resources(page.resources().clone(), 0)?;
+    walk.annotations(page)?;
+    // A stencil is sized by the stream the walk found under its key.
+    for (key, (w, h)) in unsourced {
+        match walk.known.get(&key) {
+            Some(parts) => walk.budget.charge(parts)?,
+            None => {
+                return Err(IoError::Pdf(format!(
+                    "PDF: a stencil image of {w} × {h} px is drawn from a stream that couldn't be inspected, so the page can't be opened"
+                )));
+            }
         }
     }
     Ok(())
+}
+
+/// The walk of a page's resources for [`preflight`].
+#[derive(Default)]
+struct Walk {
+    budget: Budget,
+    /// The keys of what the content placed (charged already).
+    placed: HashSet<u128>,
+    /// Every image stream found, by the key the interpreter reports for it.
+    known: HashMap<u128, Vec<Part>>,
+    /// Streams walked already (a form or pattern several resource dictionaries share).
+    visited: HashSet<ObjectIdentifier>,
+    /// Streams visited, against [`MAX_XOBJECTS`].
+    seen: usize,
+}
+
+impl Walk {
+    fn count(&mut self) -> Result<(), IoError> {
+        self.seen += 1;
+        if self.seen > MAX_XOBJECTS {
+            return Err(IoError::Pdf(format!("PDF: more than {MAX_XOBJECTS} XObjects to check, so the page can't be opened")));
+        }
+        Ok(())
+    }
+
+    /// `true` the first time `stream` is met.
+    fn first(&mut self, stream: &Stream<'_>) -> bool {
+        self.visited.insert(stream.obj_id())
+    }
+
+    /// Sizes an image stream the resources or a content stream reach, drawn or not: within the
+    /// per-image limits, and charged once when the content never placed it (the renderer draws
+    /// tiling patterns and soft masks on its own, which the content walk doesn't see).
+    fn image(&mut self, stream: &Stream<'_>, what: &'static str) -> Result<(), IoError> {
+        let parts = image_parts(stream, what)?;
+        for p in &parts {
+            p.fits()?;
+        }
+        let key = stream.cache_key();
+        if !self.placed.contains(&key) {
+            self.budget.charge(&parts)?;
+        }
+        // Identical dictionaries share a key: the costlier stream stands for them.
+        let cost = |parts: &[Part]| parts.iter().map(Part::pixels).sum::<u64>();
+        if self.known.get(&key).is_none_or(|k| cost(k) < cost(&parts)) {
+            self.known.insert(key, parts);
+        }
+        Ok(())
+    }
+
+    /// The inline images among a content stream's operators.
+    fn scan(&mut self, mut ops: TypedIter<'_>) -> Result<(), IoError> {
+        while let Some(op) = ops.next() {
+            if let TypedInstruction::InlineImage(i) = op {
+                self.image(i.0, "an inline image")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A content stream with resources of its own (a Form XObject, a tiling pattern, an annotation
+    /// appearance): scanned for inline images, its resources walked.
+    fn content(&mut self, stream: &Stream<'_>, depth: usize) -> Result<(), IoError> {
+        if !self.first(stream) {
+            return Ok(());
+        }
+        self.count()?;
+        // The content decodes as the interpreter decodes it (Flate, LZW, ASCII): no image codec.
+        if let Ok(data) = stream.decoded() {
+            self.scan(TypedIter::new(&data))?;
+        }
+        self.nested(stream.dict().get::<Dict<'_>>(b"Resources"), depth)
+    }
+
+    fn nested(&mut self, resources: Option<Dict<'_>>, depth: usize) -> Result<(), IoError> {
+        match resources {
+            Some(r) => self.resources(Resources::new(r), depth + 1),
+            None => Ok(()),
+        }
+    }
+
+    /// A resource dictionary: image XObjects are sized; Form XObjects, tiling patterns, Type 3
+    /// glyph procedures and the groups of `/ExtGState` soft masks are scanned, with their own
+    /// resources.
+    fn resources(&mut self, res: Resources<'_>, depth: usize) -> Result<(), IoError> {
+        if depth > MAX_FORM_DEPTH {
+            return Err(IoError::Pdf(format!("PDF: Form XObjects nest deeper than {MAX_FORM_DEPTH}, so the page can't be opened")));
+        }
+        for name in res.x_objects.keys() {
+            // Not a stream: the interpreter draws nothing for it.
+            let Some(stream) = res.x_objects.get::<Stream<'_>>(&name) else { continue };
+            match stream.dict().get::<Name<'_>>(b"Subtype").as_ref().map(AsRef::<[u8]>::as_ref) {
+                Some(b"Image") => {
+                    if self.first(&stream) {
+                        self.count()?;
+                        self.image(&stream, "an image")?;
+                    }
+                }
+                Some(b"Form") => self.content(&stream, depth)?,
+                _ => {}
+            }
+        }
+        for name in res.patterns.keys() {
+            // A tiling pattern is a content stream; a shading pattern is a dictionary, no image.
+            if let Some(stream) = res.patterns.get::<Stream<'_>>(&name) {
+                self.content(&stream, depth)?;
+            }
+        }
+        for name in res.fonts.keys() {
+            let Some(font) = res.fonts.get::<Dict<'_>>(&name) else { continue };
+            if !matches!(font.get::<Name<'_>>(b"Subtype").as_ref().map(AsRef::<[u8]>::as_ref), Some(b"Type3")) {
+                continue;
+            }
+            // Type 3 glyphs are content streams drawn with the font's resources (or the page's).
+            if let Some(procs) = font.get::<Dict<'_>>(b"CharProcs") {
+                for glyph in procs.keys() {
+                    if let Some(stream) = procs.get::<Stream<'_>>(&glyph)
+                        && self.first(&stream)
+                    {
+                        self.count()?;
+                        if let Ok(data) = stream.decoded() {
+                            self.scan(TypedIter::new(&data))?;
+                        }
+                    }
+                }
+            }
+            self.nested(font.get::<Dict<'_>>(b"Resources"), depth)?;
+        }
+        for name in res.ext_g_states.keys() {
+            // A soft mask in the graphics state is a transparency group the renderer draws.
+            let group = res.ext_g_states.get::<Dict<'_>>(&name).and_then(|gs| gs.get::<Dict<'_>>(b"SMask")).and_then(|sm| sm.get::<Stream<'_>>(b"G"));
+            if let Some(stream) = group {
+                self.content(&stream, depth)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The appearance streams the interpreter draws for the page's annotations: the normal
+    /// appearance, in the state `/AS` selects; hidden annotations are skipped.
+    fn annotations(&mut self, page: &Page) -> Result<(), IoError> {
+        let Some(annots) = page.raw().get::<Array<'_>>(b"Annots") else { return Ok(()) };
+        for annot in annots.iter::<Dict<'_>>() {
+            if annot.get::<u32>(b"F").unwrap_or(0) & 2 != 0 {
+                continue;
+            }
+            let Some(ap) = annot.get::<Dict<'_>>(b"AP") else { continue };
+            let stream = match ap.get::<Object<'_>>(b"N") {
+                Some(Object::Stream(s)) => Some(s),
+                Some(Object::Dict(states)) => {
+                    annot.get::<Name<'_>>(b"AS").and_then(|state| states.get::<Stream<'_>>(state)).or_else(|| states.get::<Stream<'_>>(b"Off"))
+                }
+                _ => None,
+            };
+            if let Some(s) = stream {
+                self.content(&s, 0)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------------------------- marks
@@ -711,8 +1065,19 @@ struct Marks {
     /// Which raster image (by order of drawing) to decode; the others are only placed.
     decode: Option<usize>,
     images: Vec<Placed>,
-    /// The declared pixel size of every image and stencil placed, inline images included.
-    sizes: Vec<(u32, u32)>,
+    /// Every image and stencil placed, inline images included, in drawing order.
+    placements: Vec<Placement>,
+}
+
+/// One image the content placed, for the budget: what the renderer would decode for it.
+struct Placement {
+    /// The interpreter's key for the image's stream (identical dictionaries share one).
+    key: u128,
+    /// The pixel size the file declares.
+    size: (u32, u32),
+    /// The image and its masks sized from its stream; `None` for a stencil, whose stream the
+    /// interpreter doesn't show ([`preflight`] sizes it from the resources instead).
+    parts: Option<Result<Vec<Part>, IoError>>,
 }
 
 struct Placed {
@@ -749,7 +1114,7 @@ impl Marks {
 /// Interprets `page` through a [`Marks`] device, in PDF points (y up); `decode` picks the raster
 /// image (by drawing order) whose pixels are wanted.
 fn marks(page: &Page, decode: Option<usize>) -> Marks {
-    let mut device = Marks { clips: Vec::new(), bounds: None, paths: 0, glyphs: 0, stencils: 0, decode, images: Vec::new(), sizes: Vec::new() };
+    let mut device = Marks { clips: Vec::new(), bounds: None, paths: 0, glyphs: 0, stencils: 0, decode, images: Vec::new(), placements: Vec::new() };
     let cache = InterpreterCache::new();
     let media = to_pt(norm(page.media_box()));
     let mut context = Context::new(Affine::IDENTITY, media, &cache, page.xref(), settings());
@@ -791,16 +1156,23 @@ impl<'a> Device<'a> for Marks {
         // The transform places the image's own pixel grid (top row first).
         let (w, h) = (f64::from(image.width()), f64::from(image.height()));
         self.mark(props.transform.transform_rect_bbox(PtRect::new(0.0, 0.0, w, h)));
-        self.sizes.push((image.width(), image.height()));
+        let (key, size) = (image.cache_key(), (image.width(), image.height()));
         match image {
-            Image::Stencil(_) => self.stencils = self.stencils.saturating_add(1),
+            Image::Stencil(_) => {
+                self.stencils = self.stencils.saturating_add(1);
+                self.placements.push(Placement { key, size, parts: None });
+            }
             Image::Raster(r) => {
+                // Sized from its stream, inline images included; nothing is decoded for that.
+                let what = if r.stream().dict().obj_id().is_none() { "an inline image" } else { "an image" };
+                let parts = image_parts(r.stream(), what);
                 let mut decoded = None;
                 // Decoded only within the budget ([`preflight`] refused the page otherwise).
-                if self.decode == Some(self.images.len()) && image_fits(r.width(), r.height()) {
+                if self.decode == Some(self.images.len()) && parts.as_ref().is_ok_and(|p| p.iter().all(|x| x.fits().is_ok())) {
                     r.with_rgba(|data, alpha| decoded = Some((data, alpha)), None);
                 }
-                self.images.push(Placed { transform: props.transform, size: (r.width(), r.height()), decoded });
+                self.images.push(Placed { transform: props.transform, size, decoded });
+                self.placements.push(Placement { key, size, parts: Some(parts) });
             }
         }
     }

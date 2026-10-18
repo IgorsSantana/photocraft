@@ -457,24 +457,30 @@ fn plain_import_opens_pdfs_with_photoshop_defaults() {
 
 // ---- Image budgets: refused from the file's declarations, before anything is decoded. ----
 
-/// A one-page PDF whose objects 5.. are `xobjects` (dictionary text + a tiny Flate stream each);
-/// the first `named` of them are `/X0`, `/X1`… in the page's resources (the rest are reached
-/// only through the others, as masks or a form's resources), drawn by `content`.
-fn declared_pdf(xobjects: &[&str], named: usize, content: &str) -> Vec<u8> {
-    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-    enc.write_all(&[0u8; 16]).unwrap();
-    let data = enc.finish().unwrap();
+/// A one-page PDF whose objects 5.. are `xobjects` (dictionary text and stream data each); the
+/// first `named` of them are `/X0`, `/X1`… in the page's resources (the rest are reached only
+/// through the others, as masks or a form's resources), drawn by `content`.
+fn xobject_pdf(xobjects: &[(&str, &[u8])], named: usize, content: &[u8]) -> Vec<u8> {
     let names: String = (0..xobjects.len().min(named)).map(|i| format!("/X{i} {} 0 R ", 5 + i)).collect();
     let mut objs = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << {names} >> >> /Contents 4 0 R >>").into_bytes(),
-        stream("", content.as_bytes()),
+        stream("", content),
     ];
-    for x in xobjects {
-        objs.push(stream(x, &data));
+    for (dict, data) in xobjects {
+        objs.push(stream(dict, data));
     }
     write(objs)
+}
+
+/// [`xobject_pdf`] with a tiny Flate stream behind every dictionary.
+fn declared_pdf(xobjects: &[&str], named: usize, content: &str) -> Vec<u8> {
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(&[0u8; 16]).unwrap();
+    let data = enc.finish().unwrap();
+    let with_data: Vec<(&str, &[u8])> = xobjects.iter().map(|x| (*x, data.as_slice())).collect();
+    xobject_pdf(&with_data, named, content.as_bytes())
 }
 
 const HUGE: &str = "/Type /XObject /Subtype /Image /Width 40000 /Height 40000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode";
@@ -538,9 +544,11 @@ fn an_oversized_mask_or_a_nested_or_unsized_image_refuses_too() {
         "unsized",
     );
     assert!(e.contains("doesn't declare its size"), "{e}");
-    // Too many images for one page together.
-    let per = "/Type /XObject /Subtype /Image /Width 8000 /Height 8000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode";
-    let five = [per; 5];
+    // Too many images for one page together: five distinct 64 MP images, one of them drawn.
+    let per: Vec<String> = (0..5)
+        .map(|i| format!("/Type /XObject /Subtype /Image /Width {} /Height 8000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode", 8000 - i))
+        .collect();
+    let five: Vec<&str> = per.iter().map(String::as_str).collect();
     let e = refused(&declared_pdf(&five, 5, "q 200 0 0 200 0 0 cm /X0 Do Q"), "total");
     assert!(e.contains("together"), "{e}");
     // An inline image: not in the resources, but placed.
@@ -555,4 +563,170 @@ fn an_oversized_mask_or_a_nested_or_unsized_image_refuses_too() {
     );
     let r = import_pdf("ok.pdf", &ok, &PdfOpenOptions::default(), &Interrupt::NONE).expect("opens");
     assert_eq!((r.document.size.width, r.document.size.height), (2, 2));
+}
+
+// ---- JPX: bounded from the codestream header, not only the dictionary; inline images count. ----
+
+/// A 2 × 2 grey JPEG 2000 codestream (OpenJPEG 2.5, lossless 5/3): pixels 10, 200, 90, 30.
+const J2K_GRAY_2X2: [u8; 143] = [
+    0xff, 0x4f, 0xff, 0x51, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x01, 0xff, 0x52, 0x00, 0x0c, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x04, 0x04, 0x00, 0x01, 0xff, 0x5c, 0x00, 0x07, 0x40, 0x40, 0x48, 0x48, 0x50, 0xff, 0x64, 0x00, 0x25, 0x00, 0x01, 0x43, 0x72, 0x65, 0x61,
+    0x74, 0x65, 0x64, 0x20, 0x62, 0x79, 0x20, 0x4f, 0x70, 0x65, 0x6e, 0x4a, 0x50, 0x45, 0x47, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x20, 0x32, 0x2e,
+    0x35, 0x2e, 0x30, 0xff, 0x90, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x01, 0xff, 0x93, 0xc7, 0xd4, 0x04, 0x05, 0xdf, 0xc7, 0xda, 0x05, 0x0f,
+    0xa8, 0x0a, 0x3f, 0x00, 0x20, 0x04, 0xaf, 0x05, 0xdf, 0x09, 0xd3, 0xff, 0xd9,
+];
+
+/// A JPEG 2000 codestream header alone: SOC, then a SIZ marker segment for a `w × h` image of
+/// `components` 8-bit components in one tile. Nothing decodable follows: the budget decides before
+/// any decoder runs.
+fn jpx_header_only(w: u32, h: u32, components: u16) -> Vec<u8> {
+    let mut d = vec![0xFF, 0x4F, 0xFF, 0x51];
+    d.extend_from_slice(&(38 + 3 * components).to_be_bytes());
+    d.extend_from_slice(&[0, 0]);
+    for v in [w, h, 0, 0, w, h, 0, 0] {
+        d.extend_from_slice(&v.to_be_bytes());
+    }
+    d.extend_from_slice(&components.to_be_bytes());
+    for _ in 0..components {
+        d.extend_from_slice(&[7, 1, 1]);
+    }
+    d
+}
+
+/// `codestream` in a JP2 file: the signature and file type boxes, a `jp2h` with an `ihdr` of
+/// `ihdr_size` and a greyscale `colr`, then the `jp2c` box.
+fn jp2_file(ihdr_size: (u32, u32), codestream: &[u8]) -> Vec<u8> {
+    fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(body);
+        b
+    }
+    let mut ihdr = ihdr_size.1.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&ihdr_size.0.to_be_bytes());
+    ihdr.extend_from_slice(&[0, 1, 7, 7, 0, 0]);
+    let mut jp2h = bx(b"ihdr", &ihdr);
+    jp2h.extend(bx(b"colr", &[1, 0, 0, 0, 0, 0, 17]));
+    let mut f = bx(b"jP  ", &[0x0D, 0x0A, 0x87, 0x0A]);
+    f.extend(bx(b"ftyp", b"jp2 \0\0\0\0jp2 "));
+    f.extend(bx(b"jp2h", &jp2h));
+    f.extend(bx(b"jp2c", codestream));
+    f
+}
+
+/// Content drawing one inline image with `dict` and `data`.
+fn inline(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut c = format!("q 200 0 0 200 0 0 cm BI {dict} ID ").into_bytes();
+    c.extend_from_slice(data);
+    c.extend_from_slice(b" EI Q\n");
+    c
+}
+
+const JPX_10: &str = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode";
+const DRAW_X0: &[u8] = b"q 200 0 0 200 0 0 cm /X0 Do Q";
+
+fn passes(bytes: &[u8]) -> bool {
+    preflight(page_of(&load(bytes, None).unwrap(), 1).unwrap()).is_ok()
+}
+
+#[test]
+fn a_jpx_codestream_larger_than_its_dictionary_refuses_the_page() {
+    // 10 × 10 px declared, 20000 × 20000 encoded: the decoder would build the codestream's size.
+    let big = xobject_pdf(&[(JPX_10, &jpx_header_only(20000, 20000, 1))], 1, DRAW_X0);
+    let e = refused(&big, "codestream");
+    assert!(e.contains("20000 × 20000") && e.contains("JPX"), "{e}");
+    assert!(thumbnail(&big, 1, 64, None).is_err(), "the thumbnail decodes the same image");
+    assert!(import_image("big.pdf", &big, 1, None, None, &Interrupt::NONE).is_err(), "Images mode too");
+    assert!(image_thumbnail(&big, 1, 64, None).is_err());
+    // In a JP2 file either header counts: the codestream's SIZ or the image header.
+    let e = refused(&xobject_pdf(&[(JPX_10, &jp2_file((10, 10), &jpx_header_only(20000, 20000, 1)))], 1, DRAW_X0), "jp2c");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    let e = refused(&xobject_pdf(&[(JPX_10, &jp2_file((20000, 20000), &jpx_header_only(10, 10, 1)))], 1, DRAW_X0), "ihdr");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    // Components multiply the pixels: 4000 × 4000 px of 64 components.
+    let e = refused(&xobject_pdf(&[(JPX_10, &jpx_header_only(4000, 4000, 64))], 1, DRAW_X0), "components");
+    assert!(e.contains("64 component"), "{e}");
+    assert!(passes(&xobject_pdf(&[(JPX_10, &jpx_header_only(4000, 4000, 4))], 1, DRAW_X0)), "four components are one image");
+    // A header that can't be read is refused, not decoded: behind another filter, not a
+    // codestream at all, or tiled into millions of tiles.
+    let chained = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter [/FlateDecode /JPXDecode]";
+    let e = refused(&xobject_pdf(&[(chained, &jpx_header_only(10, 10, 1))], 1, DRAW_X0), "chained");
+    assert!(e.contains("can't be checked"), "{e}");
+    let e = refused(&xobject_pdf(&[(JPX_10, b"not a codestream")], 1, DRAW_X0), "garbage");
+    assert!(e.contains("can't be checked"), "{e}");
+    let mut tiled = jpx_header_only(8000, 8000, 1);
+    tiled[24..32].copy_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1]); // XTsiz = YTsiz = 1: 64 million tiles
+    let e = refused(&xobject_pdf(&[(JPX_10, &tiled)], 1, DRAW_X0), "tiles");
+    assert!(e.contains("tiles"), "{e}");
+    // A JPX soft mask is bounded the same.
+    let masked = "/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /SMask 6 0 R";
+    let e = refused(&xobject_pdf(&[(masked, &[0u8; 16]), (JPX_10, &jpx_header_only(20000, 20000, 1))], 1, DRAW_X0), "soft mask");
+    assert!(e.contains("soft mask") && e.contains("20000 × 20000"), "{e}");
+    // Inline images: a raster one is sized from its stream by the content walk, a stencil (whose
+    // stream the interpreter doesn't show) by the content scan; in a Form XObject the content
+    // never draws, too.
+    let e = refused(&xobject_pdf(&[], 0, &inline("/W 10 /H 10 /CS /G /BPC 8 /F /JPXDecode", &jpx_header_only(20000, 20000, 1))), "inline");
+    assert!(e.contains("20000 × 20000") && e.contains("inline"), "{e}");
+    let e = refused(&xobject_pdf(&[], 0, &inline("/W 10 /H 10 /IM true /F /JPXDecode", &jpx_header_only(20000, 20000, 1))), "inline stencil");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 10 10]";
+    let e = refused(&xobject_pdf(&[(form, &inline("/W 10 /H 10 /IM true /F /JPXDecode", &jpx_header_only(20000, 20000, 1)))], 1, b""), "form inline");
+    assert!(e.contains("20000 × 20000"), "{e}");
+}
+
+#[test]
+fn a_jpx_image_within_its_dictionary_opens() {
+    // A real 2 × 2 JPEG 2000 image, raw and in a JP2 file: the budget passes it, hayro decodes it.
+    let dict = "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode";
+    for data in [J2K_GRAY_2X2.to_vec(), jp2_file((2, 2), &J2K_GRAY_2X2)] {
+        let bytes = xobject_pdf(&[(dict, &data)], 1, DRAW_X0);
+        let r = import_pdf("jpx.pdf", &bytes, &PdfOpenOptions::default(), &Interrupt::NONE).expect("opens");
+        assert_eq!((r.document.size.width, r.document.size.height, r.document.mode), (2, 2, ColorMode::Grayscale));
+        assert_eq!(r.document.layers[0].name, "Background", "a one-image page opens as the image");
+        for (x, y, want) in [(0, 0, 10.0), (1, 0, 200.0), (0, 1, 90.0), (1, 1, 30.0)] {
+            assert!((pixel(&r, x, y)[0] * 255.0 - want).abs() < 1.5, "({x}, {y}): {:?}", pixel(&r, x, y));
+        }
+        assert!(thumbnail(&bytes, 1, 32, None).is_ok());
+    }
+    // A header that agrees with the dictionary passes the budget; the data then decides (hayro
+    // can't decode a header alone, draws nothing, and the page opens as a page).
+    let dict = "/Type /XObject /Subtype /Image /Width 1000 /Height 1000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode";
+    let bytes = xobject_pdf(&[(dict, &jpx_header_only(1000, 1000, 3))], 1, DRAW_X0);
+    assert!(passes(&bytes));
+    let r = import_pdf("jpx.pdf", &bytes, &PdfOpenOptions::default(), &Interrupt::NONE).expect("not refused");
+    assert_eq!(r.document.layers[0].name, "Layer 1");
+    // An inline JPX image of the right size opens too.
+    let bytes = xobject_pdf(&[], 0, &inline("/W 2 /H 2 /CS /G /BPC 8 /F /JPXDecode", &J2K_GRAY_2X2));
+    let r = import_pdf("jpx.pdf", &bytes, &PdfOpenOptions::default(), &Interrupt::NONE).expect("opens");
+    assert_eq!((r.document.size.width, r.document.size.height), (2, 2));
+}
+
+#[test]
+fn inline_images_count_toward_the_page_total() {
+    let one = |w: u32| format!("q 10 0 0 10 0 0 cm BI /W {w} /H 8000 /CS /G /BPC 8 /F /Fl ID x EI Q\n");
+    // Five inline images of 64 MP, each within the per-image limit, 320 MP together.
+    let five: String = (0..5).map(|_| one(8000)).collect();
+    let e = refused(&declared_pdf(&[], 0, &five), "five inline");
+    assert!(e.contains("together"), "{e}");
+    // Three (192 MP) pass.
+    let three: String = (0..3).map(|_| one(8000)).collect();
+    assert!(passes(&declared_pdf(&[], 0, &three)));
+    // An image XObject is decoded every time it is drawn: the same 64 MP image five times.
+    let per = "/Type /XObject /Subtype /Image /Width 8000 /Height 8000 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode";
+    let e = refused(&declared_pdf(&[per], 1, &"q 10 0 0 10 0 0 cm /X0 Do Q\n".repeat(5)), "five drawings");
+    assert!(e.contains("together"), "{e}");
+    // Drawn once with three inline images: 256 MP, the limit; one more inline image is past it.
+    let mixed = format!("q 10 0 0 10 0 0 cm /X0 Do Q\n{three}");
+    assert!(passes(&declared_pdf(&[per], 1, &mixed)));
+    let e = refused(&declared_pdf(&[per], 1, &format!("{mixed}{}", one(8000))), "mixed");
+    assert!(e.contains("together"), "{e}");
+    // Inline images in a Form XObject the content never draws count once each; drawn twice, the
+    // form's images are decoded twice.
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 10 10]";
+    let e = refused(&xobject_pdf(&[(form, five.as_bytes())], 1, b""), "form");
+    assert!(e.contains("together"), "{e}");
+    assert!(passes(&xobject_pdf(&[(form, three.as_bytes())], 1, b"")));
+    let e = refused(&xobject_pdf(&[(form, three.as_bytes())], 1, b"q /X0 Do Q q /X0 Do Q"), "form twice");
+    assert!(e.contains("together"), "{e}");
 }
