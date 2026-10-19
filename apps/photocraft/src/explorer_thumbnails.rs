@@ -7,12 +7,15 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use photocraft_engine::prefs::ExplorerThumbnails;
 use serde_json::Value;
 
 /// What the registry was last set to by this process (0 = not yet).
 static APPLIED: AtomicU8 = AtomicU8::new(0);
+/// Serializes asynchronous startup registration with preference saves.
+static REGISTRATION_LOCK: Mutex<()> = Mutex::new(());
 
 /// A stable number for each mode, used to remember what was last applied.
 fn code(mode: ExplorerThumbnails) -> u8 {
@@ -45,9 +48,13 @@ pub fn startup(prefs_file: Option<&Path>) {
     }
     let prefs_file = prefs_file.map(Path::to_path_buf);
     let work = move || {
+        let _guard = REGISTRATION_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let mode = wanted(&prefs_file.and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default());
         if mode == ExplorerThumbnails::Off {
-            APPLIED.store(code(mode), Ordering::Relaxed);
+            match photocraft_shell::enable_explorer_thumbnails(false, true) {
+                Ok(()) => APPLIED.store(code(mode), Ordering::Relaxed),
+                Err(e) => log::debug!("Explorer thumbnails: {e}"),
+            }
         } else if let Err(e) = photocraft_shell::ensure_explorer_thumbnails(mode == ExplorerThumbnails::WithLogo) {
             // Typically the DLL is not beside the executable (a development build).
             log::debug!("Explorer thumbnails: {e}");
@@ -67,6 +74,7 @@ pub fn after_save(text: &str) {
     if !applies() {
         return;
     }
+    let _guard = REGISTRATION_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let mode = wanted(text);
     if APPLIED.load(Ordering::Relaxed) == code(mode) {
         return;

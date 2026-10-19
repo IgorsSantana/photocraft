@@ -34,6 +34,10 @@ const OVERLAY_VALUE: &str = "TypeOverlay";
 /// Value of our class key that remembers which key we put `TypeOverlay` on, so turning the badge
 /// back on removes exactly that and nothing else.
 const OVERLAY_KEY_VALUE: &str = "TypeOverlayKey";
+/// The value of `TypeOverlay` before PhotoCraft hid the badge, if one existed.
+const PREVIOUS_OVERLAY_VALUE: &str = "PreviousTypeOverlay";
+/// Whether a `TypeOverlay` value existed before PhotoCraft hid the badge.
+const HAD_PREVIOUS_OVERLAY_VALUE: &str = "HadPreviousTypeOverlay";
 /// Value of our class key that remembers the `.psd` thumbnail handler this user had before, which
 /// turning the thumbnails off puts back.
 const PREVIOUS_HANDLER_VALUE: &str = "PreviousHandler";
@@ -106,7 +110,7 @@ pub(crate) fn unregister() -> Result<(), String> {
     let overlay_key = read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE));
     let registered = ours || overlay_key.is_some() || read_default(HKEY_CURRENT_USER, &format!(r"{class_key}\InprocServer32")).is_some();
     if let Some(key) = &overlay_key {
-        clear_overlay(key);
+        restore_overlay(key, &class_key)?;
     }
     if ours {
         match read_string(HKEY_CURRENT_USER, &class_key, Some(PREVIOUS_HANDLER_VALUE)) {
@@ -152,24 +156,47 @@ fn apply_overlay(show_logo: bool) -> Result<(), String> {
     let stored = read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE));
     if show_logo {
         if let Some(key) = stored {
-            clear_overlay(&key);
+            restore_overlay(&key, &class_key)?;
             delete_value(&class_key, OVERLAY_KEY_VALUE)?;
         }
         return Ok(());
     }
     let target = overlay_target();
     if let Some(old) = stored.filter(|old| *old != target) {
-        clear_overlay(&old);
+        restore_overlay(&old, &class_key)?;
+    }
+    if read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE)).as_deref() != Some(&*target) {
+        match read_string(HKEY_CURRENT_USER, &target, Some(OVERLAY_VALUE)) {
+            Some(previous) => {
+                set_value(&class_key, Some(PREVIOUS_OVERLAY_VALUE), &previous)?;
+                set_value(&class_key, Some(HAD_PREVIOUS_OVERLAY_VALUE), "1")?;
+            }
+            None => {
+                delete_value(&class_key, PREVIOUS_OVERLAY_VALUE)?;
+                set_value(&class_key, Some(HAD_PREVIOUS_OVERLAY_VALUE), "0")?;
+            }
+        }
     }
     set_value(&target, Some(OVERLAY_VALUE), "")?;
     set_value(&class_key, Some(OVERLAY_KEY_VALUE), &target)
 }
 
-/// Removes the empty `TypeOverlay` we set on `key`; a value someone else set is left alone.
-fn clear_overlay(key: &str) {
+/// Restores the previous `TypeOverlay` value, removing only the empty value PhotoCraft applied.
+fn restore_overlay(key: &str, class_key: &str) -> Result<(), String> {
     if read_string(HKEY_CURRENT_USER, key, Some(OVERLAY_VALUE)).as_deref() == Some("") {
-        let _ = delete_value(key, OVERLAY_VALUE);
+        match read_string(HKEY_CURRENT_USER, class_key, Some(HAD_PREVIOUS_OVERLAY_VALUE)).as_deref() {
+            Some("1") => {
+                if let Some(previous) = read_string(HKEY_CURRENT_USER, class_key, Some(PREVIOUS_OVERLAY_VALUE)) {
+                    set_value(key, Some(OVERLAY_VALUE), &previous)?;
+                }
+            }
+            Some("0") | None => delete_value(key, OVERLAY_VALUE)?,
+            Some(_) => {}
+        }
     }
+    delete_value(class_key, PREVIOUS_OVERLAY_VALUE)?;
+    delete_value(class_key, HAD_PREVIOUS_OVERLAY_VALUE)?;
+    Ok(())
 }
 
 /// Does the badge setting in the registry match `show_logo`?
