@@ -93,9 +93,12 @@ pub(crate) fn register(dll: &Path, show_logo: bool) -> Result<(), String> {
     let inproc = format!(r"{class_key}\InprocServer32");
     set_value(&inproc, None, &dll.to_string_lossy())?;
     set_value(&inproc, Some("ThreadingModel"), "Apartment")?;
-    // Taking `.psd` over from a handler registered for this user: keep it, to give it back.
-    if let Some(previous) = read_default(HKEY_CURRENT_USER, SHELLEX_KEY).filter(|handler| handler != CLSID_STR) {
-        set_value(&class_key, Some(PREVIOUS_HANDLER_VALUE), &previous)?;
+    // Taking `.psd` over from a handler registered for this user: keep it, to give it back. When
+    // there is none now (another program removed it), forget the one saved earlier.
+    match read_default(HKEY_CURRENT_USER, SHELLEX_KEY) {
+        Some(handler) if handler == CLSID_STR => {}
+        Some(previous) => set_value(&class_key, Some(PREVIOUS_HANDLER_VALUE), &previous)?,
+        None => delete_value(&class_key, PREVIOUS_HANDLER_VALUE)?,
     }
     set_value(SHELLEX_KEY, None, CLSID_STR)?;
     apply_overlay(show_logo)?;
@@ -180,8 +183,10 @@ fn apply_overlay(show_logo: bool) -> Result<(), String> {
             }
         }
     }
-    set_value(&target, Some(OVERLAY_VALUE), "")?;
-    set_value(&class_key, Some(OVERLAY_KEY_VALUE), &target)
+    // Record the key before changing it, so a failure in between never leaves an empty value
+    // that nothing remembers to undo.
+    set_value(&class_key, Some(OVERLAY_KEY_VALUE), &target)?;
+    set_value(&target, Some(OVERLAY_VALUE), "")
 }
 
 /// Restores the previous `TypeOverlay` value, removing only the empty value PhotoCraft applied.
