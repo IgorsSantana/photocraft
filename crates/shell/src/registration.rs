@@ -165,8 +165,11 @@ fn apply_overlay(show_logo: bool) -> Result<(), String> {
     if let Some(old) = stored.filter(|old| *old != target) {
         restore_overlay(&old, &class_key)?;
     }
-    if read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE)).as_deref() != Some(&*target) {
-        match read_string(HKEY_CURRENT_USER, &target, Some(OVERLAY_VALUE)) {
+    // Save what is there unless it is our own empty value; another program may have changed it
+    // since we last hid the badge, and that is what turning this off must put back.
+    let current = read_string(HKEY_CURRENT_USER, &target, Some(OVERLAY_VALUE));
+    if read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE)).as_deref() != Some(&*target) || current.as_deref() != Some("") {
+        match current {
             Some(previous) => {
                 set_value(&class_key, Some(PREVIOUS_OVERLAY_VALUE), &previous)?;
                 set_value(&class_key, Some(HAD_PREVIOUS_OVERLAY_VALUE), "1")?;
