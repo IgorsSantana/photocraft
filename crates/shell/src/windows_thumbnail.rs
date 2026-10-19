@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::mem::{offset_of, zeroed};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::{addr_of_mut, null_mut};
+use std::ptr::{addr_of_mut, null, null_mut};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
@@ -18,7 +18,9 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
 use windows_sys::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromStream, GdipCreateHBITMAPFromBitmap, GdipDisposeImage, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput,
+    GdipCreateBitmapFromScan0, GdipCreateBitmapFromStream, GdipCreateHBITMAPFromBitmap, GdipDeleteGraphics, GdipDisposeImage, GdipDrawImageRectI,
+    GdipGetImageGraphicsContext, GdipGetImageHeight, GdipGetImageWidth, GdipSetInterpolationMode, GdipSetPixelOffsetMode, GdiplusShutdown, GdiplusStartup,
+    GdiplusStartupInput, GpBitmap, InterpolationModeHighQualityBicubic, PixelOffsetModeHalf,
 };
 use windows_sys::Win32::UI::Shell::SHCreateMemStream;
 use windows_sys::core::{GUID, HRESULT};
@@ -35,6 +37,10 @@ const MAX_PREFIX_BYTES: usize = 16 * 1024 * 1024;
 const FIRST_READ_BYTES: usize = 4096;
 /// `HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED)`, as `IInitializeWithStream` specifies.
 const E_ALREADY_INITIALIZED: HRESULT = 0x800700B7u32 as HRESULT;
+/// How much larger than the embedded preview an enlargement may be; beyond this it only blurs.
+const MAX_ENLARGE: u32 = 4;
+/// GDI+ `PixelFormat32bppPARGB`.
+const PIXEL_FORMAT_32BPP_PARGB: i32 = 0x000E_200B;
 /// `WTS_ALPHATYPE`: the bitmap has no meaningful alpha channel.
 const WTSAT_RGB: i32 = 1;
 
@@ -245,7 +251,7 @@ unsafe fn read_prefix(stream: *mut c_void) -> Option<Vec<u8>> {
 }
 
 /// `IThumbnailProvider::GetThumbnail`: the embedded JFIF as an `HBITMAP` that Explorer owns.
-unsafe extern "system" fn get_thumbnail(this: *mut c_void, _cx: u32, phbmp: *mut HBITMAP, pdw_alpha: *mut i32) -> HRESULT {
+unsafe extern "system" fn get_thumbnail(this: *mut c_void, cx: u32, phbmp: *mut HBITMAP, pdw_alpha: *mut i32) -> HRESULT {
     guard(|| {
         if this.is_null() || phbmp.is_null() || pdw_alpha.is_null() {
             return E_POINTER;
@@ -258,7 +264,7 @@ unsafe extern "system" fn get_thumbnail(this: *mut c_void, _cx: u32, phbmp: *mut
         let Some(data) = data.as_deref() else {
             return E_UNEXPECTED; // `Initialize` was not called.
         };
-        match psd::find_thumbnail_jpeg(data).and_then(|jpeg| jpeg_to_hbitmap(jpeg)) {
+        match psd::find_thumbnail_jpeg(data).and_then(|jpeg| jpeg_to_hbitmap(jpeg, cx)) {
             Some(hbmp) => {
                 *phbmp = hbmp;
                 *pdw_alpha = WTSAT_RGB;
@@ -269,9 +275,49 @@ unsafe extern "system" fn get_thumbnail(this: *mut c_void, _cx: u32, phbmp: *mut
     })
 }
 
-/// Decodes a JPEG with GDI+, which ships with Windows. Explorer scales the bitmap to the size it
-/// wants. The caller owns the returned `HBITMAP`.
-unsafe fn jpeg_to_hbitmap(jpeg: &[u8]) -> Option<HBITMAP> {
+/// Redraws `bitmap` with its longest side at `cx` pixels (at most [`MAX_ENLARGE`] times the
+/// original) using bicubic interpolation. Returns null when no enlargement is needed or possible,
+/// in which case the caller uses the original; a non-null result is owned by the caller.
+unsafe fn enlarge(bitmap: *mut GpBitmap, cx: u32) -> *mut GpBitmap {
+    let (mut width, mut height) = (0u32, 0u32);
+    if GdipGetImageWidth(bitmap.cast(), &mut width) != 0 || GdipGetImageHeight(bitmap.cast(), &mut height) != 0 {
+        return null_mut();
+    }
+    let longest = width.max(height);
+    let target = cx.min(longest.saturating_mul(MAX_ENLARGE));
+    if longest == 0 || target <= longest {
+        return null_mut();
+    }
+    let scale = |side: u32| ((u64::from(side) * u64::from(target)) / u64::from(longest)).max(1);
+    let (Ok(new_width), Ok(new_height)) = (i32::try_from(scale(width)), i32::try_from(scale(height))) else {
+        return null_mut();
+    };
+
+    let mut result: *mut GpBitmap = null_mut();
+    if GdipCreateBitmapFromScan0(new_width, new_height, 0, PIXEL_FORMAT_32BPP_PARGB, null(), &mut result) != 0 || result.is_null() {
+        return null_mut();
+    }
+    let mut graphics = null_mut();
+    let mut drawn = GdipGetImageGraphicsContext(result.cast(), &mut graphics) == 0 && !graphics.is_null();
+    if drawn {
+        // `Half` keeps the border pixels from fading out.
+        drawn = GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic) == 0
+            && GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf) == 0
+            && GdipDrawImageRectI(graphics, bitmap.cast(), 0, 0, new_width, new_height) == 0;
+    }
+    if !graphics.is_null() {
+        GdipDeleteGraphics(graphics);
+    }
+    if drawn {
+        return result;
+    }
+    GdipDisposeImage(result.cast());
+    null_mut()
+}
+
+/// Decodes a JPEG with GDI+, which ships with Windows, and enlarges it towards `cx` pixels when
+/// it is smaller. The caller owns the returned `HBITMAP`.
+unsafe fn jpeg_to_hbitmap(jpeg: &[u8], cx: u32) -> Option<HBITMAP> {
     let stream = SHCreateMemStream(jpeg.as_ptr(), u32::try_from(jpeg.len()).ok()?);
     if stream.is_null() {
         return None;
@@ -288,9 +334,16 @@ unsafe fn jpeg_to_hbitmap(jpeg: &[u8]) -> Option<HBITMAP> {
     let mut bitmap = null_mut();
     let mut hbmp: HBITMAP = null_mut();
     let mut ok = GdipCreateBitmapFromStream(stream, &mut bitmap) == 0 && !bitmap.is_null();
+    let mut enlarged = null_mut();
     if ok {
-        // Opaque white background; a JPEG has no alpha anyway.
-        ok = GdipCreateHBITMAPFromBitmap(bitmap, &mut hbmp, 0xFFFF_FFFF) == 0 && !hbmp.is_null();
+        // Opaque white background; a JPEG has no alpha anyway. A preview smaller than the size
+        // Explorer asks for is enlarged with a better filter than Explorer's own scaling.
+        enlarged = enlarge(bitmap, cx);
+        let source = if enlarged.is_null() { bitmap } else { enlarged };
+        ok = GdipCreateHBITMAPFromBitmap(source, &mut hbmp, 0xFFFF_FFFF) == 0 && !hbmp.is_null();
+    }
+    if !enlarged.is_null() {
+        GdipDisposeImage(enlarged.cast());
     }
     if !bitmap.is_null() {
         GdipDisposeImage(bitmap.cast());
