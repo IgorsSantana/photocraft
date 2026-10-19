@@ -39,6 +39,8 @@ const FIRST_READ_BYTES: usize = 4096;
 const E_ALREADY_INITIALIZED: HRESULT = 0x800700B7u32 as HRESULT;
 /// How much larger than the embedded preview an enlargement may be; beyond this it only blurs.
 const MAX_ENLARGE: u32 = 4;
+/// Most pixels an enlarged bitmap may have (16 MiB at 32 bpp), whatever size Explorer asks for.
+const MAX_ENLARGED_PIXELS: u64 = 2048 * 2048;
 /// GDI+ `PixelFormat32bppPARGB`.
 const PIXEL_FORMAT_32BPP_PARGB: i32 = 0x000E_200B;
 /// `WTS_ALPHATYPE`: the bitmap has no meaningful alpha channel.
@@ -276,7 +278,7 @@ unsafe extern "system" fn get_thumbnail(this: *mut c_void, cx: u32, phbmp: *mut 
 }
 
 /// Redraws `bitmap` with its longest side at `cx` pixels (at most [`MAX_ENLARGE`] times the
-/// original) using bicubic interpolation. Returns null when no enlargement is needed or possible,
+/// original) using bicubic interpolation, within [`MAX_ENLARGED_PIXELS`]. Returns null when no enlargement is needed or possible,
 /// in which case the caller uses the original; a non-null result is owned by the caller.
 unsafe fn enlarge(bitmap: *mut GpBitmap, cx: u32) -> *mut GpBitmap {
     let (mut width, mut height) = (0u32, 0u32);
@@ -289,6 +291,9 @@ unsafe fn enlarge(bitmap: *mut GpBitmap, cx: u32) -> *mut GpBitmap {
         return null_mut();
     }
     let scale = |side: u32| ((u64::from(side) * u64::from(target)) / u64::from(longest)).max(1);
+    if scale(width) * scale(height) > MAX_ENLARGED_PIXELS {
+        return null_mut();
+    }
     let (Ok(new_width), Ok(new_height)) = (i32::try_from(scale(width)), i32::try_from(scale(height))) else {
         return null_mut();
     };
