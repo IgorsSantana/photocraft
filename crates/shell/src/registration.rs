@@ -112,26 +112,33 @@ pub(crate) fn register(dll: &Path, show_logo: bool) -> Result<(), String> {
 }
 
 /// Removes the `.psd` association (only when it is ours), the badge setting and the COM class.
+///
+/// The association comes first: it is what makes Explorer load the provider, so a failure to put the
+/// cosmetic badge setting back must not leave the provider enabled. When only the badge restore
+/// fails, the class key (which remembers what to restore) is kept and the error is returned, so a
+/// later call can finish the job.
 pub(crate) fn unregister() -> Result<(), String> {
     let class_key = class_key();
     let ours = read_default(HKEY_CURRENT_USER, SHELLEX_KEY).as_deref().is_some_and(is_our_clsid);
     let overlay_key = read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE));
     let registered = ours || overlay_key.is_some() || read_default(HKEY_CURRENT_USER, &format!(r"{class_key}\InprocServer32")).is_some();
-    if let Some(key) = &overlay_key {
-        restore_overlay(key, &class_key)?;
-    }
     if ours {
-        match read_string(HKEY_CURRENT_USER, &class_key, Some(PREVIOUS_HANDLER_VALUE)) {
-            Some(previous) => set_value(SHELLEX_KEY, None, &previous)?,
-            None => delete_tree(SHELLEX_KEY)?,
-        }
+        let removed = match read_string(HKEY_CURRENT_USER, &class_key, Some(PREVIOUS_HANDLER_VALUE)) {
+            Some(previous) => set_value(SHELLEX_KEY, None, &previous),
+            None => delete_tree(SHELLEX_KEY),
+        };
+        removed?;
     }
-    delete_tree(&class_key)?;
+    let overlay = match &overlay_key {
+        Some(key) => restore_overlay(key, &class_key),
+        None => Ok(()),
+    };
+    let result = overlay.and_then(|()| delete_tree(&class_key));
     // Refreshing every icon is disruptive: only when something was actually removed.
     if registered {
         notify_shell();
     }
-    Ok(())
+    result
 }
 
 /// The key that holds the badge setting: the file type (ProgID) Windows resolves for `.psd`, whose
