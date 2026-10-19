@@ -14,6 +14,7 @@ use serde_json::Value;
 /// What the registry was last set to by this process (0 = not yet).
 static APPLIED: AtomicU8 = AtomicU8::new(0);
 
+/// A stable number for each mode, used to remember what was last applied.
 fn code(mode: ExplorerThumbnails) -> u8 {
     match mode {
         ExplorerThumbnails::Off => 1,

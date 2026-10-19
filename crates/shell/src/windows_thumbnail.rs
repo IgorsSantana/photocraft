@@ -46,6 +46,7 @@ const IID_ITHUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xE357FCCD_A995_4576_B01F_
 /// Live objects plus server locks; backs `DllCanUnloadNow`.
 static LIVE_COUNT: AtomicI32 = AtomicI32::new(0);
 
+/// Compares two GUIDs field by field.
 fn guid_eq(a: &GUID, b: &GUID) -> bool {
     a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
 }
@@ -127,6 +128,7 @@ unsafe fn from_thumb(this: *mut c_void) -> *mut Provider {
     (this as *mut u8).sub(offset_of!(Provider, thumb_vtbl)) as *mut Provider
 }
 
+/// Shared `QueryInterface`: hands out the `IUnknown`, `IInitializeWithStream` or `IThumbnailProvider` vtable.
 unsafe fn provider_query(p: *mut Provider, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     if ppv.is_null() {
         return E_POINTER;
@@ -147,10 +149,12 @@ unsafe fn provider_query(p: *mut Provider, riid: *const GUID, ppv: *mut *mut c_v
     S_OK
 }
 
+/// Increments the provider's reference count and returns the new count.
 unsafe fn provider_add_ref(p: *mut Provider) -> u32 {
     (*p).refs.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+/// Decrements the reference count and frees the provider when it reaches zero.
 unsafe fn provider_release(p: *mut Provider) -> u32 {
     let remaining = (*p).refs.fetch_sub(1, Ordering::SeqCst) - 1;
     if remaining == 0 {
@@ -160,21 +164,27 @@ unsafe fn provider_release(p: *mut Provider) -> u32 {
     remaining
 }
 
+/// `IInitializeWithStream::QueryInterface`.
 unsafe extern "system" fn init_query_interface(this: *mut c_void, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     guard(|| provider_query(this as *mut Provider, riid, ppv))
 }
+/// `IInitializeWithStream::AddRef`.
 unsafe extern "system" fn init_add_ref(this: *mut c_void) -> u32 {
     provider_add_ref(this as *mut Provider)
 }
+/// `IInitializeWithStream::Release`.
 unsafe extern "system" fn init_release(this: *mut c_void) -> u32 {
     provider_release(this as *mut Provider)
 }
+/// `IThumbnailProvider::QueryInterface`.
 unsafe extern "system" fn thumb_query_interface(this: *mut c_void, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     guard(|| provider_query(from_thumb(this), riid, ppv))
 }
+/// `IThumbnailProvider::AddRef`.
 unsafe extern "system" fn thumb_add_ref(this: *mut c_void) -> u32 {
     provider_add_ref(from_thumb(this))
 }
+/// `IThumbnailProvider::Release`.
 unsafe extern "system" fn thumb_release(this: *mut c_void) -> u32 {
     provider_release(from_thumb(this))
 }
@@ -260,7 +270,7 @@ unsafe extern "system" fn get_thumbnail(this: *mut c_void, _cx: u32, phbmp: *mut
 }
 
 /// Decodes a JPEG with GDI+, which ships with Windows. Explorer scales the bitmap to the size it
-/// wants.
+/// wants. The caller owns the returned `HBITMAP`.
 unsafe fn jpeg_to_hbitmap(jpeg: &[u8]) -> Option<HBITMAP> {
     let stream = SHCreateMemStream(jpeg.as_ptr(), u32::try_from(jpeg.len()).ok()?);
     if stream.is_null() {
@@ -296,6 +306,7 @@ unsafe fn jpeg_to_hbitmap(jpeg: &[u8]) -> Option<HBITMAP> {
     None
 }
 
+/// Releases the in-memory `IStream` that `jpeg_to_hbitmap` created for GDI+.
 unsafe fn release_stream(stream: *mut c_void) {
     let vtbl = *(stream as *mut *const IUnknownVtbl);
     if !vtbl.is_null() {
@@ -311,6 +322,7 @@ struct Factory {
     refs: AtomicU32,
 }
 
+/// `IClassFactory::QueryInterface`.
 unsafe extern "system" fn factory_query_interface(this: *mut c_void, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     guard(|| {
         if ppv.is_null() || riid.is_null() {
@@ -327,10 +339,12 @@ unsafe extern "system" fn factory_query_interface(this: *mut c_void, riid: *cons
     })
 }
 
+/// `IClassFactory::AddRef`.
 unsafe extern "system" fn factory_add_ref(this: *mut c_void) -> u32 {
     (*(this as *mut Factory)).refs.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+/// `IClassFactory::Release`: frees the factory when the last reference goes.
 unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {
     let factory = this as *mut Factory;
     let remaining = (*factory).refs.fetch_sub(1, Ordering::SeqCst) - 1;
@@ -341,6 +355,7 @@ unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {
     remaining
 }
 
+/// `IClassFactory::CreateInstance`: creates a provider and returns the requested interface.
 unsafe extern "system" fn factory_create_instance(_this: *mut c_void, outer: *mut c_void, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     guard(|| {
         if ppv.is_null() {
@@ -360,6 +375,7 @@ unsafe extern "system" fn factory_create_instance(_this: *mut c_void, outer: *mu
     })
 }
 
+/// `IClassFactory::LockServer`: keeps the DLL loaded while locked.
 unsafe extern "system" fn factory_lock_server(_this: *mut c_void, lock: i32) -> HRESULT {
     LIVE_COUNT.fetch_add(if lock != 0 { 1 } else { -1 }, Ordering::SeqCst);
     S_OK

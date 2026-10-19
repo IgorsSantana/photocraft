@@ -71,6 +71,7 @@ fn sibling_dll() -> Result<PathBuf, String> {
     exe.parent().map(|dir| dir.join(DLL_NAME)).filter(|path| path.is_file()).ok_or_else(|| format!("{DLL_NAME} not found next to the executable"))
 }
 
+/// The registry path of this provider's COM class.
 fn class_key() -> String {
     format!(r"Software\Classes\CLSID\{CLSID_STR}")
 }
@@ -130,6 +131,7 @@ fn overlay_target() -> String {
     }
 }
 
+/// The file type (ProgID) Windows resolves for `.psd`, if any.
 fn psd_prog_id() -> Option<String> {
     let ext = wide(".psd");
     let mut buf = [0u16; 256];
@@ -201,10 +203,12 @@ pub(crate) fn current_module_path() -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from_wide(buf.get(..len)?)))
 }
 
+/// `s` as a NUL-terminated UTF-16 string for Win32 calls.
 fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// `Ok` for `ERROR_SUCCESS`, otherwise an error naming the failed call and its Win32 code.
 fn check(code: u32, what: &str) -> Result<(), String> {
     if code == ERROR_SUCCESS { Ok(()) } else { Err(format!("{what} failed (Win32 error {code})")) }
 }
@@ -262,6 +266,7 @@ fn delete_value(path: &str, name: &str) -> Result<(), String> {
     if rc == ERROR_FILE_NOT_FOUND { Ok(()) } else { check(rc, "RegDeleteKeyValueW") }
 }
 
+/// Deletes an HKCU key and everything under it; a key that is already gone is fine.
 fn delete_tree(path: &str) -> Result<(), String> {
     let path_w = wide(path);
     // SAFETY: `path_w` is NUL-terminated and outlives the call.
@@ -269,6 +274,7 @@ fn delete_tree(path: &str) -> Result<(), String> {
     if rc == ERROR_FILE_NOT_FOUND { Ok(()) } else { check(rc, "RegDeleteTreeW") }
 }
 
+/// Tells Explorer that file associations changed, so it refreshes its thumbnails and icons.
 fn notify_shell() {
     // SAFETY: null item pointers are valid for `SHCNE_ASSOCCHANGED`.
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, null(), null()) };

@@ -21,10 +21,12 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    /// A reader over `data`, positioned at the start.
     fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
+    /// The next `len` bytes, or `None` (without moving) when fewer remain.
     fn take(&mut self, len: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(len)?;
         let slice = self.data.get(self.pos..end)?;
@@ -32,18 +34,22 @@ impl<'a> Reader<'a> {
         Some(slice)
     }
 
+    /// Reads one byte.
     fn u8(&mut self) -> Option<u8> {
         self.take(1)?.first().copied()
     }
 
+    /// Reads a big-endian `u16`.
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_be_bytes(self.take(2)?.try_into().ok()?))
     }
 
+    /// Reads a big-endian `u32`.
     fn u32(&mut self) -> Option<u32> {
         Some(u32::from_be_bytes(self.take(4)?.try_into().ok()?))
     }
 
+    /// The bytes not read yet.
     fn rest(&self) -> &'a [u8] {
         self.data.get(self.pos..).unwrap_or(&[])
     }
@@ -91,6 +97,7 @@ pub fn find_thumbnail_jpeg(psd: &[u8]) -> Option<&[u8]> {
     }
 }
 
+/// The JPEG inside a 1036 thumbnail resource block (after its 28-byte header), if it is a JFIF.
 fn parse_thumbnail(block: &[u8]) -> Option<&[u8]> {
     let mut r = Reader::new(block);
     if r.u32()? != FORMAT_JPEG_RGB {
