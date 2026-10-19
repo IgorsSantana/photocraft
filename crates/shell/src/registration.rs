@@ -21,6 +21,11 @@ use windows_sys::Win32::UI::Shell::{ASSOCSTR_PROGID, AssocQueryStringW, SHCNE_AS
 
 /// CLSID of the PhotoCraft PSD thumbnail provider.
 pub const CLSID_STR: &str = "{8D6B2D5C-3F41-4B7A-9C0E-5A17E2B94D63}";
+
+/// CLSID registry values are case-insensitive, even when returned as strings.
+fn is_our_clsid(value: &str) -> bool {
+    value.eq_ignore_ascii_case(CLSID_STR)
+}
 /// `.psd` handler key; the GUID in the path is the `IThumbnailProvider` IID, which is how Explorer
 /// finds the thumbnail handler of an extension.
 const SHELLEX_KEY: &str = r"Software\Classes\.psd\ShellEx\{E357FCCD-A995-4576-B01F-234630154E96}";
@@ -63,7 +68,7 @@ pub fn enable_explorer_thumbnails(enable: bool, show_logo: bool) -> Result<(), S
 pub fn ensure_explorer_thumbnails(show_logo: bool) -> Result<(), String> {
     let dll = sibling_dll()?;
     match read_default(HKEY_CLASSES_ROOT, THUMBNAIL_HANDLER_KEY) {
-        Some(other) if other != CLSID_STR => Ok(()),
+        Some(other) if !is_our_clsid(&other) => Ok(()),
         _ if is_registered_to(&dll) && overlay_ok(show_logo) => Ok(()),
         _ => register(&dll, show_logo),
     }
@@ -82,7 +87,7 @@ fn class_key() -> String {
 
 /// Is `.psd` already registered to this class, served from `dll`?
 fn is_registered_to(dll: &Path) -> bool {
-    read_default(HKEY_CURRENT_USER, SHELLEX_KEY).as_deref() == Some(CLSID_STR)
+    read_default(HKEY_CURRENT_USER, SHELLEX_KEY).as_deref().is_some_and(is_our_clsid)
         && read_default(HKEY_CURRENT_USER, &format!(r"{}\InprocServer32", class_key())).as_deref() == Some(&*dll.to_string_lossy())
 }
 
@@ -96,7 +101,7 @@ pub(crate) fn register(dll: &Path, show_logo: bool) -> Result<(), String> {
     // Taking `.psd` over from a handler registered for this user: keep it, to give it back. When
     // there is none now (another program removed it), forget the one saved earlier.
     match read_default(HKEY_CURRENT_USER, SHELLEX_KEY) {
-        Some(handler) if handler == CLSID_STR => {}
+        Some(handler) if is_our_clsid(&handler) => {}
         Some(previous) => set_value(&class_key, Some(PREVIOUS_HANDLER_VALUE), &previous)?,
         None => delete_value(&class_key, PREVIOUS_HANDLER_VALUE)?,
     }
@@ -109,7 +114,7 @@ pub(crate) fn register(dll: &Path, show_logo: bool) -> Result<(), String> {
 /// Removes the `.psd` association (only when it is ours), the badge setting and the COM class.
 pub(crate) fn unregister() -> Result<(), String> {
     let class_key = class_key();
-    let ours = read_default(HKEY_CURRENT_USER, SHELLEX_KEY).as_deref() == Some(CLSID_STR);
+    let ours = read_default(HKEY_CURRENT_USER, SHELLEX_KEY).as_deref().is_some_and(is_our_clsid);
     let overlay_key = read_string(HKEY_CURRENT_USER, &class_key, Some(OVERLAY_KEY_VALUE));
     let registered = ours || overlay_key.is_some() || read_default(HKEY_CURRENT_USER, &format!(r"{class_key}\InprocServer32")).is_some();
     if let Some(key) = &overlay_key {
@@ -313,4 +318,16 @@ fn delete_tree(path: &str) -> Result<(), String> {
 fn notify_shell() {
     // SAFETY: null item pointers are valid for `SHCNE_ASSOCCHANGED`.
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, null(), null()) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLSID_STR, is_our_clsid};
+
+    #[test]
+    fn recognizes_case_variants_of_our_clsid() {
+        assert!(is_our_clsid(CLSID_STR));
+        assert!(is_our_clsid(&CLSID_STR.to_ascii_lowercase()));
+        assert!(!is_our_clsid("{11111111-2222-3333-4444-555555555555}"));
+    }
 }
