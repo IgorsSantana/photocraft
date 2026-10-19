@@ -151,6 +151,15 @@
       <Component Id="PhotocraftCli">
         <File Id="PhotocraftCliExe" Source="$(var.BinDir)\photocraft-cli.exe" KeyPath="yes" />
       </Component>
+<?ifdef ShellDll?>
+
+      <!-- File Explorer thumbnails for PSD files (crates/shell). This only puts the COM DLL beside
+           photocraft.exe: the app registers it for each user (Preferences › File Handling ›
+           Explorer Thumbnails), so the choice stays per user. Not built for x86 (package.ps1). -->
+      <Component Id="PhotocraftShell">
+        <File Id="PhotocraftShellDll" Source="$(var.ShellDll)" KeyPath="yes" />
+      </Component>
+<?endif?>
     </ComponentGroup>
   </Fragment>
 </Wix>
