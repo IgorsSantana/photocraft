@@ -11,7 +11,10 @@ description = "Windows Explorer thumbnail provider that shows the embedded previ
 crate-type = ["cdylib", "rlib"]
 
 # The second isolated `unsafe` helper crate (after `photocraft-tablet`): a COM server is raw FFI
-# by nature. Every `unsafe` block carries a `SAFETY:` comment; the PSD parser (`psd.rs`) is safe.
+# by nature.
+# Every `unsafe` function and block follows the safety contract at the top of `windows_thumbnail.rs`
+# (the four invariants it numbers) or carries a `SAFETY:` comment (`registration.rs`). The PSD parser
+# (`psd.rs`), the only code that reads untrusted bytes, is safe.
 # Every other crate keeps the workspace's `unsafe_code = "forbid"`.
 [lints.rust]
 unsafe_code = "deny"

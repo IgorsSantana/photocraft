@@ -4,6 +4,28 @@
 //! hosts thumbnail handlers). There is no `unwrap`, `expect` or `panic!`, every COM entry point
 //! runs inside [`guard`], and every failure is reported as `E_FAIL`, so Explorer falls back to the
 //! default icon.
+//!
+//! # Safety contract
+//!
+//! Everything here is `unsafe` because a COM server is, by definition, raw FFI: Windows calls into
+//! this DLL through function pointers and hands it raw pointers. The code relies on four
+//! invariants, which the functions below refer to by number:
+//!
+//! 1. **Layout.** [`Provider`] and `Factory` are `#[repr(C)]` with their vtable pointer(s) first,
+//!    so a COM interface pointer is a pointer into the object, and `from_thumb` recovers the
+//!    object from the second interface with `offset_of!`. The vtables are `static`, so they never
+//!    dangle.
+//! 2. **Lifetime.** An object is freed only when its reference count reaches zero, by the single
+//!    `Box::from_raw` in `provider_release` / `factory_release`. `LIVE_COUNT` mirrors live objects
+//!    so `DllCanUnloadNow` never lets the DLL unload under a live object.
+//! 3. **Caller pointers.** Every pointer that Windows passes in (`this`, `riid`, `ppv`, `phbmp`,
+//!    `stream`, ...) is checked for null before use, and every output pointer is set to null first,
+//!    so a failing call never leaves the caller with a stale value. Windows guarantees that
+//!    non-null interface pointers are valid for the duration of the call.
+//! 4. **Resources.** Each GDI+ object, GDI `HBITMAP`, and COM stream acquired in a function is
+//!    released on every path out of it; the one `HBITMAP` that is returned is owned by Explorer.
+//!
+//! The PSD parsing ([`crate::psd`]) is safe code and is the only code that looks at untrusted bytes.
 #![allow(unsafe_code, non_snake_case, unsafe_op_in_unsafe_fn)]
 
 use std::ffi::c_void;
@@ -133,6 +155,7 @@ impl Provider {
 
 /// The object behind an `IThumbnailProvider` interface pointer.
 unsafe fn from_thumb(this: *mut c_void) -> *mut Provider {
+    // SAFETY (invariant 1): `this` points at the `thumb_vtbl` field of a `Provider`.
     (this as *mut u8).sub(offset_of!(Provider, thumb_vtbl)) as *mut Provider
 }
 
@@ -166,6 +189,8 @@ unsafe fn provider_add_ref(p: *mut Provider) -> u32 {
 unsafe fn provider_release(p: *mut Provider) -> u32 {
     let remaining = (*p).refs.fetch_sub(1, Ordering::SeqCst) - 1;
     if remaining == 0 {
+        // SAFETY (invariant 2): the last reference is gone, so nothing else uses `p`; it came
+        // from `Box::into_raw` in `Provider::create`.
         drop(Box::from_raw(p));
         LIVE_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
@@ -222,6 +247,8 @@ unsafe extern "system" fn initialize(this: *mut c_void, stream: *mut c_void, _mo
 /// header says they occupy (never more than [`MAX_PREFIX_BYTES`]), so a multi-gigabyte document is
 /// not read through to show a 160 px preview. `None` when it is not a PSD/PSB.
 unsafe fn read_prefix(stream: *mut c_void) -> Option<Vec<u8>> {
+    // SAFETY (invariant 3): `stream` is a non-null `IStream` handed over by Explorer, whose first
+    // field is its vtable pointer; `Read` is called with a buffer at least `step` bytes long.
     let vtbl = *(stream as *mut *const IStreamVtbl);
     if vtbl.is_null() {
         return None;
@@ -322,6 +349,8 @@ unsafe fn enlarge(bitmap: *mut GpBitmap, cx: u32) -> *mut GpBitmap {
 
 /// Decodes a JPEG with GDI+, which ships with Windows, and enlarges it towards `cx` pixels when
 /// it is smaller. The caller owns the returned `HBITMAP`.
+// Invariant 4: `stream`, the GDI+ bitmaps, the GDI+ token and (on failure) `hbmp` are all released
+// below on every path; only a successful `hbmp` leaves this function.
 unsafe fn jpeg_to_hbitmap(jpeg: &[u8], cx: u32) -> Option<HBITMAP> {
     let stream = SHCreateMemStream(jpeg.as_ptr(), u32::try_from(jpeg.len()).ok()?);
     if stream.is_null() {
@@ -366,6 +395,8 @@ unsafe fn jpeg_to_hbitmap(jpeg: &[u8], cx: u32) -> Option<HBITMAP> {
 
 /// Releases the in-memory `IStream` that `jpeg_to_hbitmap` created for GDI+.
 unsafe fn release_stream(stream: *mut c_void) {
+    // SAFETY (invariants 3 and 4): `stream` is the non-null stream from `SHCreateMemStream`, still
+    // holding the reference taken there; this releases it exactly once.
     let vtbl = *(stream as *mut *const IUnknownVtbl);
     if !vtbl.is_null() {
         ((*vtbl).release)(stream);
@@ -407,6 +438,7 @@ unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {
     let factory = this as *mut Factory;
     let remaining = (*factory).refs.fetch_sub(1, Ordering::SeqCst) - 1;
     if remaining == 0 {
+        // SAFETY (invariant 2): last reference; created by `Box::into_raw` in `DllGetClassObject`.
         drop(Box::from_raw(factory));
         LIVE_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
