@@ -18,10 +18,12 @@ unsafe_code = "deny"
 
 [lints.clippy]
 dbg_macro = "warn"
-todo = "warn"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
 
 # Already in Cargo.lock; pinned exactly: review the diff before bumping. Compiles to nothing on
 # macOS, Linux and the web.

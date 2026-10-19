@@ -567,6 +567,7 @@ fn explorer_thumbnails_is_a_windows_only_choice_defaulting_to_on_with_logo() {
         assert_eq!(s.prefs().file_handling.explorer_thumbnails, want);
     }
     assert!(s.execute("prefs.set", json!({"path": "fileHandling.explorerThumbnails", "value": "sometimes"})).is_err());
+    assert_eq!(s.prefs().file_handling.explorer_thumbnails, ExplorerThumbnails::WithLogo);
     // Older preference files without the setting keep it on.
     let mut t = Session::new();
     t.load_prefs_json(r#"{"fileHandling": {"autosave": false}}"#).unwrap();
