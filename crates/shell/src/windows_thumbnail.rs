@@ -229,6 +229,12 @@ unsafe extern "system" fn initialize(this: *mut c_void, stream: *mut c_void, _mo
         if provider.is_null() || stream.is_null() {
             return E_POINTER;
         }
+        // A repeated call is refused before any I/O, as `IInitializeWithStream` specifies.
+        match (*provider).data.lock() {
+            Ok(slot) if slot.is_some() => return E_ALREADY_INITIALIZED,
+            Ok(_) => {}
+            Err(_) => return E_FAIL,
+        }
         let Some(bytes) = read_prefix(stream) else {
             return E_FAIL;
         };

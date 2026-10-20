@@ -52,6 +52,9 @@
     <Feature Id="Main" Title="PhotoCraft" Level="1">
       <ComponentGroupRef Id="PhotocraftFiles" />
     </Feature>
+<?ifdef ShellDll?>
+    <CustomActionRef Id="UnregisterShellThumbnails" />
+<?endif?>
 
     <!-- The setup wizard: WixUI_InstallDir without its licence page (the code is MIT OR
          Apache-2.0; there is nothing to accept). A later NewDialog on the same button wins. -->
@@ -162,4 +165,19 @@
 <?endif?>
     </ComponentGroup>
   </Fragment>
+<?ifdef ShellDll?>
+
+  <Fragment>
+    <!-- On uninstall, undo the uninstalling user's registration (`regsvr32 /u` calls the DLL's
+         DllUnregisterServer) before the DLL is deleted: it puts back the .psd thumbnail handler
+         and badge setting that PhotoCraft replaced. It runs as that user, so only their registry
+         is touched; other users' registrations fall back to the default icon until they are
+         changed. Not on upgrades: the new version keeps the same DLL path. -->
+    <CustomAction Id="UnregisterShellThumbnails" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="yes" Return="ignore"
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[#PhotocraftShellDll]&quot;" />
+    <InstallExecuteSequence>
+      <Custom Action="UnregisterShellThumbnails" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Fragment>
+<?endif?>
 </Wix>
