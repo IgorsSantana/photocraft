@@ -1,7 +1,9 @@
 //! The PDF image budget as a wasm32 run (no browser, no bindings), built as a binary so it needs
 //! none of the crate's dev-dependencies: a PDF whose image declares far more pixels than it holds,
-//! or whose JPX codestream encodes far more than its dictionary declares, or whose inline images
-//! pass the page's budget together, is refused before any decoder runs. On wasm32-unknown-unknown
+//! or whose JPX codestream, CCITT fax parameters or JBIG2 page information make the decoder build
+//! far more than its dictionary declares, or whose inline images pass the page's budget together,
+//! or whose content or Form XObject goes through an image codec, is refused before any decoder
+//! runs. On wasm32-unknown-unknown
 //! an attempt to decode would abort the module (an allocation past linear memory), so a normal
 //! return is the proof. Natively it is the same check. Build and run:
 //!
@@ -47,6 +49,44 @@ fn stream(extra: &str, data: &[u8]) -> Vec<u8> {
     o.extend_from_slice(data);
     o.extend_from_slice(b"\nendstream");
     o
+}
+
+/// A one-page PDF whose content stream has `contents_dict` entries, with `resources`, and objects
+/// 5.. `more` (dictionary and data each, as streams).
+fn pdf_with(resources: &str, contents_dict: &str, content: &[u8], more: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << {resources} >> /Contents 4 0 R >>").into_bytes(),
+        stream(contents_dict, content),
+    ];
+    for (dict, data) in more {
+        objs.push(stream(dict, data));
+    }
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// A JBIG2 stream (embedded organisation) of one page information segment for `w × h`.
+fn jbig2_page_only(w: u32, h: u32) -> Vec<u8> {
+    let mut d = vec![0, 0, 0, 0, 48, 0, 1, 0, 0, 0, 19];
+    d.extend_from_slice(&w.to_be_bytes());
+    d.extend_from_slice(&h.to_be_bytes());
+    d.extend_from_slice(&[0; 11]);
+    d
 }
 
 /// Content drawing one inline image with `dict` and `data`.
@@ -118,5 +158,25 @@ fn main() {
     // Five inline images of 64 MP each, within the per-image limit, 320 MP together.
     let one = b"q 10 0 0 10 0 0 cm BI /W 8000 /H 8000 /CS /G /BPC 8 /F /Fl ID x EI Q\n";
     refused(&pdf_of(None, &one.repeat(5)), "together");
+    // CCITT fax: 10 × 10 px declared, /Columns × /Rows 20000 × 20000 (the decoder's buffer); as an
+    // XObject and an inline stencil.
+    let ccitt = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 20000 /Rows 20000 >>";
+    refused(&pdf_of(Some((ccitt, &[0; 8])), draw), "20000 × 20000");
+    refused(&pdf_of(None, &inline("/W 10 /H 10 /IM true /F /CCF /DP << /K -1 /Columns 20000 /Rows 20000 >>", &[0; 8])), "20000 × 20000");
+    // JBIG2: 10 × 10 px declared, a 20000 × 20000 page information segment.
+    let jbig2 = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode";
+    refused(&pdf_of(Some((jbig2, &jbig2_page_only(20000, 20000))), draw), "20000 × 20000");
+    // A JPX codestream as the page's content, and as a Form XObject the page never draws: no image
+    // codec outside an image.
+    refused(&pdf_with("", "/Filter /JPXDecode", &jpx_header_only(20000, 20000), &[]), "JPXDecode");
+    refused(
+        &pdf_with(
+            "/XObject << /F 5 0 R >>",
+            "",
+            b"",
+            &[("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Filter /JPXDecode", &jpx_header_only(20000, 20000))],
+        ),
+        "JPXDecode",
+    );
     println!("pdf image budget: ok");
 }

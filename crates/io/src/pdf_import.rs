@@ -38,6 +38,7 @@ use hayro::hayro_interpret::{
 };
 use hayro::hayro_syntax::content::TypedIter;
 use hayro::hayro_syntax::content::ops::TypedInstruction;
+use hayro::hayro_syntax::object::dict::keys;
 use hayro::hayro_syntax::object::{Array, Dict, Name, Object, ObjectIdentifier, Stream};
 use hayro::hayro_syntax::page::{Page, Resources, Rotation};
 use hayro::hayro_syntax::{Filter, LoadPdfError, Pdf};
@@ -73,6 +74,10 @@ const MAX_XOBJECTS: usize = 10_000;
 const MAX_JPX_TILES: u64 = 65_536;
 /// Deepest nesting of Form XObjects the walk follows.
 const MAX_FORM_DEPTH: usize = 32;
+/// Most dictionaries, arrays and streams [`codec_check`] walks through for one page.
+const MAX_OBJECTS: usize = 200_000;
+/// Deepest nesting of dictionaries and arrays [`codec_check`] follows.
+const MAX_OBJECT_DEPTH: usize = 256;
 /// The resolution the dialog starts at, as Photoshop's.
 pub const DEFAULT_RESOLUTION: f32 = 300.0;
 /// The resolution range the dialog accepts.
@@ -90,9 +95,10 @@ pub const WRONG_PASSWORD: &str = "that isn't the PDF's password";
 /// (their own font boxes); this one box stands for all of them.
 pub const GLYPH_BOX: [f64; 4] = [-1050.0, -530.0, 2410.0, 1240.0];
 
-/// `true` if `bytes` start a PDF file: the `%PDF-` marker within the first kilobyte (the
+/// `true` if `bytes` may start a PDF file: the `%PDF-` marker within the first kilobyte (the
 /// specification allows leading bytes before it, and files do carry a byte-order mark or a
-/// shell line there).
+/// shell line there). Opening decides with [`crate::is_pdf_input`], which leaves a file that
+/// doesn't start with the marker to the SVG and raster importers when they take it.
 pub fn is_pdf(bytes: &[u8]) -> bool {
     let head = bytes.get(..bytes.len().min(1024)).unwrap_or(bytes);
     head.windows(5).any(|w| w == b"%PDF-")
@@ -273,6 +279,10 @@ pub fn opens_as_image(bytes: &[u8], password: Option<&str>) -> bool {
         return false;
     }
     let Some(page) = pdf.pages().first() else { return false };
+    // Interpreting the page decodes its content and fonts: only streams no image codec decodes.
+    if codec_check(page).is_err() {
+        return false;
+    }
     let m = marks(page, None);
     m.paths == 0 && m.glyphs == 0 && m.stencils == 0 && m.images.len() == 1
 }
@@ -295,6 +305,7 @@ pub fn bounding_box(bytes: &[u8], page: usize, password: Option<&str>) -> Result
     let pdf = load(bytes, password)?;
     let p = page_of(&pdf, page)?;
     let info = page_info(p);
+    codec_check(p)?;
     Ok(marks(p, None).bounds_within(info.crop))
 }
 
@@ -420,6 +431,7 @@ pub fn images(bytes: &[u8], password: Option<&str>) -> Result<Vec<PdfImage>, IoE
     let pdf = load(bytes, password)?;
     let mut out = Vec::new();
     for (p, page) in pdf.pages().iter().enumerate() {
+        codec_check(page)?;
         let m = marks(page, None);
         for placed in m.images {
             out.push(PdfImage { index: out.len() + 1, page: p + 1, width: placed.size.0, height: placed.size.1 });
@@ -429,13 +441,15 @@ pub fn images(bytes: &[u8], password: Option<&str>) -> Result<Vec<PdfImage>, IoE
 }
 
 /// Image `index` (from 1, counted through the file) as the document Photoshop opens for it in
-/// Images mode: the image's own pixels on a `Background` layer, named `stem-N`.
+/// Images mode: the image's own pixels on a `Background` layer, named `stem-N`, untitled (not tied
+/// to the PDF for Save).
 pub fn import_image(name: &str, bytes: &[u8], index: usize, chosen: Option<&str>, password: Option<&str>, ctl: &Interrupt) -> Result<ImportResult, IoError> {
     ctl.check().map_err(|_| IoError::Cancelled)?;
     let pdf = load(bytes, password)?;
     let mut seen = 0usize;
     for page in pdf.pages().iter() {
-        // Count this page's images first (no decoding), then decode the one asked for.
+        // Count this page's images first (no image decoding), then decode the one asked for.
+        codec_check(page)?;
         let n = marks(page, None).images.len();
         if index > seen && index <= seen + n {
             ctl.progress(0.3);
@@ -445,7 +459,8 @@ pub fn import_image(name: &str, bytes: &[u8], index: usize, chosen: Option<&str>
             let doc = placed
                 .and_then(|p| image_document(&image_name(name, chosen, index), &p))
                 .ok_or_else(|| IoError::Pdf(format!("image {index} couldn't be decoded")))?;
-            return Ok(ImportResult { document: doc, warnings: Vec::new(), source_read_only: false, preview_only: false });
+            // Not tied to the PDF for Save: Photoshop leaves it untitled.
+            return Ok(ImportResult { document: doc, warnings: Vec::new(), source_read_only: true, preview_only: false });
         }
         seen = seen.saturating_add(n);
         ctl.check().map_err(|_| IoError::Cancelled)?;
@@ -636,8 +651,8 @@ fn no_size(what: &str) -> IoError {
     IoError::Pdf(format!("PDF: {what} doesn't declare its size, so its decoding can't be bounded; the page can't be opened"))
 }
 
-fn unchecked_jpx(what: &str, why: &str) -> IoError {
-    IoError::Pdf(format!("PDF: {what} is a JPX image whose size can't be checked before decoding ({why}), so the page can't be opened"))
+fn unchecked(what: &str, codec: &str, why: &str) -> IoError {
+    IoError::Pdf(format!("PDF: {what} is a {codec} image whose size can't be checked before decoding ({why}), so the page can't be opened"))
 }
 
 /// The `/Width × /Height` an image stream declares (`/W`, `/H` in an inline image).
@@ -655,6 +670,48 @@ struct JpxHeader {
     components: u16,
 }
 
+/// What an image codec builds, as its own data or parameters say rather than the dictionary's
+/// `/Width × /Height` (which these decoders don't go by).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Encoded {
+    /// JPXDecode: what the codestream encodes.
+    Jpx(JpxHeader),
+    /// CCITTFaxDecode: `/Columns × max(/Rows, /Height)` from its `/DecodeParms`, the buffer the
+    /// decoder allocates before it reads any data.
+    Ccitt((u32, u32)),
+    /// JBIG2Decode: the page its page information segment declares (or its stripes add up to).
+    Jbig2((u32, u32)),
+}
+
+impl Encoded {
+    fn size(self) -> (u32, u32) {
+        match self {
+            Encoded::Jpx(j) => j.size,
+            Encoded::Ccitt(s) | Encoded::Jbig2(s) => s,
+        }
+    }
+
+    /// The pixels decoding builds: a JPX image with more than four components counted once per
+    /// four of them.
+    fn pixels(self) -> u64 {
+        let (w, h) = self.size();
+        let planes = match self {
+            Encoded::Jpx(j) => u64::from(j.components).div_ceil(4).max(1),
+            _ => 1,
+        };
+        u64::from(w) * u64::from(h) * planes
+    }
+
+    fn describe(self) -> String {
+        let (w, h) = self.size();
+        match self {
+            Encoded::Jpx(j) => format!("a JPX image whose codestream encodes {w} × {h} px with {} component(s)", j.components),
+            Encoded::Ccitt(_) => format!("a CCITT fax image whose /DecodeParms make the decoder build {w} × {h} px"),
+            Encoded::Jbig2(_) => format!("a JBIG2 image whose page information gives {w} × {h} px"),
+        }
+    }
+}
+
 /// One image a stream decodes to, sized from the file without decoding: an image, or its soft
 /// mask or explicit mask, each an image of its own.
 #[derive(Clone, Debug)]
@@ -662,20 +719,16 @@ struct Part {
     what: &'static str,
     /// The dictionary's `/Width × /Height`.
     declared: (u32, u32),
-    /// For a `JPXDecode` stream, what its codestream encodes: the decoder builds that size,
-    /// whatever the dictionary declares.
-    encoded: Option<JpxHeader>,
+    /// For a stream an image codec decodes, what that codec builds, whatever the dictionary
+    /// declares.
+    encoded: Option<Encoded>,
 }
 
 impl Part {
-    /// The pixels decoding it builds: the larger of the declared and the encoded size, a JPX
-    /// image with more than four components counted once per four of them.
+    /// The pixels decoding it builds: the larger of the declared and the encoded size.
     fn pixels(&self) -> u64 {
         let declared = u64::from(self.declared.0) * u64::from(self.declared.1);
-        match self.encoded {
-            Some(j) => declared.max(u64::from(j.size.0) * u64::from(j.size.1) * u64::from(j.components).div_ceil(4).max(1)),
-            None => declared,
-        }
+        self.encoded.map_or(declared, |e| declared.max(e.pixels()))
     }
 
     /// Refuses the part when decoding it alone would pass the per-image limits.
@@ -684,15 +737,13 @@ impl Part {
         if !image_fits(w, h) {
             return Err(image_error(self.what, w, h));
         }
-        if let Some(j) = self.encoded
-            && (!image_fits(j.size.0, j.size.1) || self.pixels() > MAX_IMAGE_PIXELS)
+        if let Some(e) = self.encoded
+            && (!image_fits(e.size().0, e.size().1) || self.pixels() > MAX_IMAGE_PIXELS)
         {
             return Err(IoError::Pdf(format!(
-                "PDF: {} of {w} × {h} px is a JPX image whose codestream encodes {} × {} px with {} component(s), past the {MAX_SIDE} px / {} MP limit, so the page can't be opened",
+                "PDF: {} of {w} × {h} px is {}, past the {MAX_SIDE} px / {} MP limit, so the page can't be opened",
                 self.what,
-                j.size.0,
-                j.size.1,
-                j.components,
+                e.describe(),
                 MAX_IMAGE_PIXELS / 1_000_000
             )));
         }
@@ -700,20 +751,91 @@ impl Part {
     }
 }
 
-/// Sizes one image stream without decoding it. For a `JPXDecode` stream the codestream header
-/// is read too, which needs JPXDecode to be the stream's one filter (behind another filter the
-/// bytes would have to be decoded first) and the header to parse; otherwise the image is refused,
-/// since its decoding can't be bounded.
+/// The image codecs, by their PDF names: each sizes what it builds by its own data or parameters,
+/// so only images, whose size [`preflight`] checks against them, may use one.
+fn image_codec(f: Filter) -> Option<&'static str> {
+    match f {
+        Filter::DctDecode => Some("DCTDecode"),
+        Filter::JpxDecode => Some("JPXDecode"),
+        Filter::Jbig2Decode => Some("JBIG2Decode"),
+        Filter::CcittFaxDecode => Some("CCITTFaxDecode"),
+        _ => None,
+    }
+}
+
+/// The filter a name stands for, as `hayro-syntax` reads it (abbreviations included).
+fn filter_named(name: &[u8]) -> Option<Filter> {
+    Some(match name {
+        keys::ASCII_HEX_DECODE | keys::ASCII_HEX_DECODE_ABBREVIATION => Filter::AsciiHexDecode,
+        keys::ASCII85_DECODE | keys::ASCII85_DECODE_ABBREVIATION => Filter::Ascii85Decode,
+        keys::LZW_DECODE | keys::LZW_DECODE_ABBREVIATION => Filter::LzwDecode,
+        keys::FLATE_DECODE | keys::FLATE_DECODE_ABBREVIATION => Filter::FlateDecode,
+        keys::RUN_LENGTH_DECODE | keys::RUN_LENGTH_DECODE_ABBREVIATION => Filter::RunLengthDecode,
+        keys::CCITTFAX_DECODE | keys::CCITTFAX_DECODE_ABBREVIATION => Filter::CcittFaxDecode,
+        keys::JBIG2_DECODE => Filter::Jbig2Decode,
+        keys::DCT_DECODE | keys::DCT_DECODE_ABBREVIATION => Filter::DctDecode,
+        keys::JPX_DECODE => Filter::JpxDecode,
+        keys::CRYPT => Filter::Crypt,
+        _ => return None,
+    })
+}
+
+/// A stream's filters, each with the `/DecodeParms` it gets, paired as `hayro-syntax` pairs them:
+/// one filter name and one dictionary, or two arrays read side by side, a filter it doesn't know
+/// skipped with its parameters.
+fn filter_chain<'a>(dict: &Dict<'a>) -> Vec<(Filter, Dict<'a>)> {
+    let one = dict.get::<Name<'_>>(b"F").or_else(|| dict.get::<Name<'_>>(b"Filter")).and_then(|n| filter_named(n.as_ref()));
+    if let Some(f) = one {
+        let params = dict.get::<Dict<'_>>(b"DP").or_else(|| dict.get::<Dict<'_>>(b"DecodeParms")).unwrap_or_default();
+        return vec![(f, params)];
+    }
+    let Some(names) = dict.get::<Array<'_>>(b"F").or_else(|| dict.get::<Array<'_>>(b"Filter")) else { return Vec::new() };
+    let mut params = dict.get::<Array<'_>>(b"DP").or_else(|| dict.get::<Array<'_>>(b"DecodeParms")).map(|a| a.iter::<Object<'_>>());
+    let mut out = Vec::new();
+    for name in names.iter::<Name<'_>>() {
+        let p = params.as_mut().and_then(Iterator::next).and_then(Object::into_dict).unwrap_or_default();
+        if let Some(f) = filter_named(name.as_ref()) {
+            out.push((f, p));
+        }
+    }
+    out
+}
+
+/// Refuses `stream` when an image codec decodes it: for anything but an image (a content stream,
+/// a font, a profile, `/JBIG2Globals`) that codec's output couldn't be bounded.
+fn not_image_coded(stream: &Stream<'_>, what: &str) -> Result<(), IoError> {
+    match stream.filters().into_iter().find_map(image_codec) {
+        Some(codec) => {
+            Err(IoError::Pdf(format!("PDF: {what}, which isn't an image, is coded with {codec}, which only images may use, so the page can't be opened")))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Sizes one image stream without decoding it. The image codecs size what they build by their own
+/// data or parameters, so those are read too: a JPX codestream's header or a JBIG2 stream's segment
+/// headers (the codec must then be the stream's one filter: behind another filter the bytes would
+/// have to be decoded first; data that can't be read refuses the image) and a CCITT fax filter's
+/// `/DecodeParms`. A stream with two image codecs is refused.
 fn part_of(stream: &Stream<'_>, what: &'static str) -> Result<Part, IoError> {
     let declared = declared_size(stream.dict()).ok_or_else(|| no_size(what))?;
-    let filters = stream.filters();
-    let encoded = if filters.contains(&Filter::JpxDecode) {
-        if filters.len() != 1 {
-            return Err(unchecked_jpx(what, "JPXDecode isn't its only filter"));
+    let chain = filter_chain(stream.dict());
+    let mut codecs = chain.iter().filter(|(f, _)| image_codec(*f).is_some());
+    let (codec, second) = (codecs.next(), codecs.next());
+    if second.is_some() {
+        return Err(IoError::Pdf(format!("PDF: {what} goes through two image codecs, so its decoding can't be bounded; the page can't be opened")));
+    }
+    let alone = chain.len() == 1;
+    let encoded = match codec {
+        Some((Filter::JpxDecode, _)) if !alone => return Err(unchecked(what, "JPX", "JPXDecode isn't its only filter")),
+        Some((Filter::JpxDecode, _)) => Some(Encoded::Jpx(jpx_header(&stream.raw_data()).map_err(|why| unchecked(what, "JPX", why))?)),
+        Some((Filter::Jbig2Decode, _)) if !alone => return Err(unchecked(what, "JBIG2", "JBIG2Decode isn't its only filter")),
+        Some((Filter::Jbig2Decode, params)) => {
+            let globals = jbig2_globals(params).map_err(|why| unchecked(what, "JBIG2", why))?;
+            Some(Encoded::Jbig2(jbig2_page(&stream.raw_data(), globals.as_deref()).map_err(|why| unchecked(what, "JBIG2", why))?))
         }
-        Some(jpx_header(&stream.raw_data()).map_err(|why| unchecked_jpx(what, why))?)
-    } else {
-        None
+        Some((Filter::CcittFaxDecode, params)) => Some(Encoded::Ccitt(ccitt_size(params, declared.1))),
+        _ => None,
     };
     Ok(Part { what, declared, encoded })
 }
@@ -728,6 +850,132 @@ fn image_parts(stream: &Stream<'_>, what: &'static str) -> Result<Vec<Part>, IoE
         }
     }
     Ok(parts)
+}
+
+/// The buffer a CCITT fax filter allocates before it reads any data, `/Columns` (1728 when absent)
+/// by the larger of `/Rows` and the image's `/Height`, read exactly as `hayro-syntax` reads them.
+fn ccitt_size(params: &Dict<'_>, height: u32) -> (u32, u32) {
+    let columns = params.get::<usize>(b"Columns").unwrap_or(1728) as u32;
+    (columns, params.get::<u32>(b"Rows").unwrap_or(0).max(height))
+}
+
+/// The `/JBIG2Globals` a JBIG2 filter's parameters name, decoded as the decoder decodes them (one
+/// that doesn't decode is left out, as the decoder leaves it out). `Err` when an image codec would
+/// decode them.
+fn jbig2_globals(params: &Dict<'_>) -> Result<Option<Vec<u8>>, &'static str> {
+    let Some(g) = params.get::<Stream<'_>>(b"JBIG2Globals") else { return Ok(None) };
+    if g.filters().into_iter().any(|f| image_codec(f).is_some()) {
+        return Err("its JBIG2Globals stream is coded with an image codec");
+    }
+    Ok(g.decoded().ok().map(|d| d.into_owned()))
+}
+
+/// The page a JBIG2 stream decodes to, read from its segment headers (the globals' first, as
+/// `hayro-jbig2` reads them, embedded organisation, ITU-T T.88 7.2) without decoding: the page
+/// information segment with the lowest number gives the size, an unknown height (0xFFFFFFFF) the
+/// end-of-stripe rows. The decoder and the image built from it allocate that page; every generic
+/// or refinement region it composes onto it declares its own size, which must fit the per-image
+/// limits too. Symbol dictionaries, text regions, pattern dictionaries and halftone regions are
+/// refused: the decoder builds their symbols and patterns at sizes the coded data gives, which
+/// can't be read without decoding. A segment that can't be read is refused rather than decoded.
+fn jbig2_page(data: &[u8], globals: Option<&[u8]>) -> Result<(u32, u32), &'static str> {
+    let mut page: Option<(u32, u32, u32)> = None;
+    let mut stripes: Option<u32> = None;
+    for part in globals.into_iter().chain([data]) {
+        let mut at = 0;
+        while at < part.len() {
+            let seg = jbig2_segment(part, at)?;
+            let body = seg.data;
+            match seg.kind {
+                // Page information: width, height, then resolutions, flags and striping.
+                48 => {
+                    let (Some(w), Some(h)) = (be32(body, 0), be32(body, 4)) else { return Err("its page information is truncated") };
+                    if page.is_none_or(|(n, _, _)| seg.number < n) {
+                        page = Some((seg.number, w, h));
+                    }
+                }
+                // End of stripe: the last row of the stripe.
+                50 => {
+                    if let Some(rows) = be32(body, 0).and_then(|r| r.checked_add(1)) {
+                        stripes = Some(stripes.map_or(rows, |s| s.max(rows)));
+                    }
+                }
+                // Generic and generic refinement regions, intermediate or immediate: the region
+                // segment information starts with the bitmap's width and height.
+                36 | 38 | 39 | 40 | 42 | 43 => {
+                    let (Some(w), Some(h)) = (be32(body, 0), be32(body, 4)) else { return Err("a region segment is truncated") };
+                    if !image_fits(w, h) {
+                        return Err("a region segment declares a bitmap past the limits");
+                    }
+                }
+                0 | 4 | 6 | 7 | 16 | 20 | 22 | 23 => return Err("it uses symbol or halftone coding, whose bitmaps take their sizes from the coded data"),
+                // End of page or file, profiles, tables, colour palettes, extensions: no bitmap.
+                49 | 51 | 52 | 53 | 54 | 62 => {}
+                _ => return Err("it has a segment of an unknown type"),
+            }
+            at = seg.next;
+            // The decoder stops reading this part at an end-of-file segment.
+            if seg.kind == 51 {
+                break;
+            }
+        }
+    }
+    let Some((_, w, h)) = page else { return Err("it has no page information segment") };
+    let h = if h == u32::MAX { stripes.ok_or("its page height is unknown and no stripe ends")? } else { h };
+    Ok((w, h))
+}
+
+/// One segment of a JBIG2 stream: its number, type and data, and where the next one starts.
+struct Jbig2Segment<'a> {
+    number: u32,
+    kind: u8,
+    data: &'a [u8],
+    next: usize,
+}
+
+/// The segment at `at`, read as `hayro-jbig2` reads it (ITU-T T.88 7.2): number, flags (type and
+/// page association size), referred-to segments (short or long form, each number 1, 2 or 4 bytes
+/// by the segment's own number), page association, data length. An unknown length (0xFFFFFFFF)
+/// ends at the first end marker after the region segment information and flags (0x00 0x00 with
+/// MMR, else 0xFF 0xAC), plus the row count after it.
+fn jbig2_segment(d: &[u8], at: usize) -> Result<Jbig2Segment<'_>, &'static str> {
+    const SHORT: &str = "a segment header is truncated";
+    let number = be32(d, at).ok_or(SHORT)?;
+    let flags = *d.get(at + 4).ok_or(SHORT)?;
+    let count_byte = *d.get(at + 5).ok_or(SHORT)?;
+    let (count, mut p) = match count_byte >> 5 {
+        c @ 0..=4 => (u64::from(c), at + 6),
+        7 => {
+            let c = be32(d, at + 5).ok_or(SHORT)? & 0x1FFF_FFFF;
+            let retention = (c as usize).checked_add(1).ok_or(SHORT)?.div_ceil(8);
+            (u64::from(c), (at + 9).checked_add(retention).ok_or(SHORT)?)
+        }
+        _ => return Err("a segment header is invalid"),
+    };
+    let width: u64 = if number <= 256 {
+        1
+    } else if number <= 65_536 {
+        2
+    } else {
+        4
+    };
+    let referred = usize::try_from(count * width).map_err(|_| SHORT)?;
+    p = p.checked_add(referred).ok_or(SHORT)?;
+    p = p.checked_add(if flags & 0x40 != 0 { 4 } else { 1 }).ok_or(SHORT)?;
+    let length = be32(d, p).ok_or(SHORT)?;
+    let start = p + 4;
+    let end = if length == u32::MAX {
+        let mmr = d.get(start + 17).ok_or(SHORT)? & 1 != 0;
+        let marker: [u8; 2] = if mmr { [0x00, 0x00] } else { [0xFF, 0xAC] };
+        let from = start + 18;
+        let tail = d.get(from..).ok_or(SHORT)?;
+        let found = tail.windows(6).position(|w| w.starts_with(&marker)).ok_or("a region of unknown length has no end marker")?;
+        from + found + 6
+    } else {
+        start.checked_add(length as usize).ok_or(SHORT)?
+    };
+    let data = d.get(start..end).ok_or(SHORT)?;
+    Ok(Jbig2Segment { number, kind: flags & 0x3F, data, next: end })
 }
 
 fn be16(d: &[u8], at: usize) -> Option<u16> {
@@ -847,8 +1095,12 @@ impl Budget {
 
 /// Refuses a page whose images couldn't be decoded within the budgets, before anything is
 /// decoded or rendered (the decoders build each image at the size the file declares, or that its
-/// JPX codestream encodes, however small the output asked for). Nothing here decodes an image:
+/// codec's own data or parameters give, however small the output asked for). Nothing here decodes
+/// an image:
 ///
+/// * first [`codec_check`] reads the dictionaries of every stream the page can reach and refuses
+///   one that isn't an image but would go through an image codec, so what is decoded below (the
+///   content, fonts, Form XObjects) never runs one;
 /// * the content is interpreted once through the [`Marks`] device, and every image it places
 ///   (XObjects, inline images and stencils, through Form XObjects, Type 3 glyphs and annotation
 ///   appearances) is charged once per drawing, as the renderer decodes an image every time it
@@ -860,10 +1112,12 @@ impl Budget {
 ///   images in all those content streams; one the content never placed is charged once.
 ///
 /// Refused: an image past [`MAX_IMAGE_PIXELS`] or [`MAX_SIDE`] on a side, a page whose images pass
-/// [`MAX_PAGE_IMAGE_PIXELS`] together, an image that doesn't declare its size, a JPX image whose
-/// codestream header can't be read (so its decoding can't be bounded), a stencil drawn from a
-/// stream the walk didn't reach, and a resource tree too deep or too large to walk.
+/// [`MAX_PAGE_IMAGE_PIXELS`] together, an image that doesn't declare its size, a JPX or JBIG2 image
+/// whose headers can't be read or a JBIG2 image in symbol or halftone coding (so its decoding
+/// can't be bounded), a stream other than an image that an image codec would decode, a stencil
+/// drawn from a stream the walk didn't reach, and a resource tree too deep or too large to walk.
 fn preflight(page: &Page) -> Result<(), IoError> {
+    codec_check(page)?;
     let mut walk = Walk::default();
     // What the content places, once per drawing.
     let mut unsourced = Vec::new();
@@ -957,7 +1211,8 @@ impl Walk {
             return Ok(());
         }
         self.count()?;
-        // The content decodes as the interpreter decodes it (Flate, LZW, ASCII): no image codec.
+        // Decoded as the interpreter decodes it, through general-purpose filters only.
+        not_image_coded(stream, "a content stream")?;
         if let Ok(data) = stream.decoded() {
             self.scan(TypedIter::new(&data))?;
         }
@@ -1010,6 +1265,7 @@ impl Walk {
                         && self.first(&stream)
                     {
                         self.count()?;
+                        not_image_coded(&stream, "a Type 3 glyph")?;
                         if let Ok(data) = stream.decoded() {
                             self.scan(TypedIter::new(&data))?;
                         }
@@ -1046,6 +1302,191 @@ impl Walk {
             };
             if let Some(s) = stream {
                 self.content(&s, 0)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Refuses a page that would hand a stream other than an image to an image codec (DCT, JPX,
+/// JBIG2, CCITT fax), before anything of the page is decoded. Those codecs size what they build by
+/// their own data, which nothing checks outside an image (see [`part_of`]), and `hayro` applies a
+/// stream's filters whatever the stream is for: the page's content, Form XObjects, tiling patterns,
+/// shadings and functions, Type 3 glyph procedures, soft-mask groups, annotation appearances, font
+/// programs and CMaps, ICC profiles, `/JBIG2Globals`. None of those has a use for an image codec.
+///
+/// Only dictionaries are read. Everything the page's content, resources (its own or inherited),
+/// group and annotation appearances reach is walked; a stream counts as an image only where the
+/// interpreter decodes one, an `/XObject` entry with `/Subtype /Image` and the `/SMask` and
+/// `/Mask` streams of an image, and such an image's own codec is [`preflight`]'s to size. A walk
+/// past [`MAX_OBJECTS`] or [`MAX_OBJECT_DEPTH`] refuses the page.
+fn codec_check(page: &Page) -> Result<(), IoError> {
+    let mut walk = Codecs::default();
+    match page.raw().get::<Object<'_>>(b"Contents") {
+        Some(Object::Stream(s)) => walk.stream(&s, b"Contents", 0)?,
+        Some(Object::Array(a)) => {
+            for s in a.iter::<Stream<'_>>() {
+                walk.stream(&s, b"Contents", 0)?;
+            }
+        }
+        _ => {}
+    }
+    let r = page.resources();
+    walk.x_objects(&r.x_objects, None, 0)?;
+    for d in [&r.ext_g_states, &r.fonts, &r.properties, &r.color_spaces, &r.patterns, &r.shadings] {
+        walk.names(d, None, 0)?;
+    }
+    if let Some(group) = page.raw().get::<Dict<'_>>(b"Group") {
+        walk.dict(&group, false, ref_of(page.raw(), b"Group"), 0)?;
+    }
+    if let Some(annots) = page.raw().get::<Array<'_>>(b"Annots") {
+        for annot in annots.iter::<Dict<'_>>() {
+            if let Some(ap) = annot.get::<Dict<'_>>(b"AP") {
+                walk.dict(&ap, false, ref_of(&annot, b"AP"), 0)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The indirect object `d`'s entry `key` refers to, if it is a reference. (A dictionary's own
+/// `obj_id` is that of the object it sits in, direct or not.)
+fn ref_of(d: &Dict<'_>, key: &[u8]) -> Option<ObjectIdentifier> {
+    d.get_ref(key).map(ObjectIdentifier::from)
+}
+
+/// The walk of [`codec_check`].
+#[derive(Default)]
+struct Codecs {
+    /// Indirect objects walked already, by whether they were met as an image (a stream met as
+    /// both is checked as both).
+    visited: HashSet<(ObjectIdentifier, bool)>,
+    /// Dictionaries, arrays and streams walked, against [`MAX_OBJECTS`].
+    seen: usize,
+}
+
+impl Codecs {
+    /// Counts an object about to be walked; `false` when the indirect object `id` was walked
+    /// already in this role.
+    fn enter(&mut self, id: Option<ObjectIdentifier>, image: bool, depth: usize) -> Result<bool, IoError> {
+        if depth > MAX_OBJECT_DEPTH || self.seen >= MAX_OBJECTS {
+            return Err(IoError::Pdf("PDF: the page's resources nest too deep or hold too many objects to check, so the page can't be opened".to_string()));
+        }
+        if let Some(id) = id
+            && !self.visited.insert((id, image))
+        {
+            return Ok(false);
+        }
+        self.seen += 1;
+        Ok(true)
+    }
+
+    /// Entry `key` of `d`, whatever it holds.
+    fn entry(&mut self, d: &Dict<'_>, key: &[u8], depth: usize) -> Result<(), IoError> {
+        match d.get::<Object<'_>>(key) {
+            Some(v) => self.value(key, v, ref_of(d, key), depth),
+            None => Ok(()),
+        }
+    }
+
+    /// `v`, found under `key`; `id` when it is an indirect object.
+    fn value(&mut self, key: &[u8], v: Object<'_>, id: Option<ObjectIdentifier>, depth: usize) -> Result<(), IoError> {
+        match v {
+            Object::Dict(d) => self.dict(&d, false, id, depth),
+            Object::Stream(s) => self.stream(&s, key, depth),
+            Object::Array(a) => {
+                if self.enter(id, false, depth)? {
+                    for v in a.iter::<Object<'_>>() {
+                        self.value(key, v, None, depth + 1)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// A dictionary (`image` for an image stream's, whose masks are images too).
+    fn dict(&mut self, d: &Dict<'_>, image: bool, id: Option<ObjectIdentifier>, depth: usize) -> Result<(), IoError> {
+        if !self.enter(id, image, depth)? {
+            return Ok(());
+        }
+        self.entries(d, image, depth)
+    }
+
+    /// An object's entries. Keys that lead back up the page tree or to data the renderer never
+    /// decodes are skipped; the dictionaries that map names a file chooses (resources, Type 3
+    /// glyphs, appearance states, colorants) are walked whole, whatever the names.
+    fn entries(&mut self, d: &Dict<'_>, image: bool, depth: usize) -> Result<(), IoError> {
+        for key in d.keys() {
+            let k: &[u8] = key.as_ref();
+            match k {
+                b"Parent" | b"P" | b"Metadata" | b"PieceInfo" | b"Thumb" | b"AF" | b"EF" | b"OPI" | b"Ref" | b"Alternates" => {}
+                b"XObject" => {
+                    if let Some(x) = d.get::<Dict<'_>>(k) {
+                        self.x_objects(&x, ref_of(d, k), depth + 1)?;
+                    }
+                }
+                b"Font" | b"ExtGState" | b"ColorSpace" | b"Pattern" | b"Shading" | b"Properties" | b"CharProcs" | b"Colorants" | b"N" | b"R" | b"D" => {
+                    match d.get::<Object<'_>>(k) {
+                        Some(Object::Dict(names)) => self.names(&names, ref_of(d, k), depth + 1)?,
+                        Some(v) => self.value(k, v, ref_of(d, k), depth + 1)?,
+                        None => {}
+                    }
+                }
+                b"SMask" | b"Mask" if image => match d.get::<Object<'_>>(k) {
+                    Some(Object::Stream(m)) => self.image(&m, depth + 1)?,
+                    Some(v) => self.value(k, v, ref_of(d, k), depth + 1)?,
+                    None => {}
+                },
+                _ => self.entry(d, k, depth + 1)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// A dictionary of names the file chose: every entry is walked.
+    fn names(&mut self, d: &Dict<'_>, id: Option<ObjectIdentifier>, depth: usize) -> Result<(), IoError> {
+        if !self.enter(id, false, depth)? {
+            return Ok(());
+        }
+        for key in d.keys() {
+            self.entry(d, key.as_ref(), depth + 1)?;
+        }
+        Ok(())
+    }
+
+    /// A stream met anywhere but as an image (`key` names where): refused if an image codec
+    /// decodes it.
+    fn stream(&mut self, s: &Stream<'_>, key: &[u8], depth: usize) -> Result<(), IoError> {
+        if !self.enter(Some(s.obj_id()), false, depth)? {
+            return Ok(());
+        }
+        not_image_coded(s, &format!("the /{} stream", String::from_utf8_lossy(key)))?;
+        self.entries(s.dict(), false, depth)
+    }
+
+    /// An image stream: its codec is the image's (sized by [`preflight`]); what it refers to (an
+    /// ICC profile, `/JBIG2Globals`) is checked.
+    fn image(&mut self, s: &Stream<'_>, depth: usize) -> Result<(), IoError> {
+        if !self.enter(Some(s.obj_id()), true, depth)? {
+            return Ok(());
+        }
+        self.entries(s.dict(), true, depth)
+    }
+
+    /// An `/XObject` dictionary: the interpreter decodes an entry as an image by its `/Subtype`.
+    fn x_objects(&mut self, x: &Dict<'_>, id: Option<ObjectIdentifier>, depth: usize) -> Result<(), IoError> {
+        if !self.enter(id, false, depth)? {
+            return Ok(());
+        }
+        for key in x.keys() {
+            match x.get::<Object<'_>>(&key) {
+                Some(Object::Stream(s)) if s.dict().get::<Name<'_>>(b"Subtype").as_ref().map(AsRef::<[u8]>::as_ref) == Some(b"Image") => {
+                    self.image(&s, depth + 1)?
+                }
+                Some(v) => self.value(key.as_ref(), v, ref_of(x, key.as_ref()), depth + 1)?,
+                None => {}
             }
         }
         Ok(())

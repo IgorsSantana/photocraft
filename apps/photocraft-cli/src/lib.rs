@@ -15,7 +15,7 @@ pub const USAGE: &str = "\
 photocraft-cli: headless PhotoCraft
 
 USAGE:
-  photocraft-cli convert <in> <out> [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>] [--dpx-bits <8|10|12|16>] [--dds-compression <none|bc1|bc2|bc3>] [--dds-mipmaps]
+  photocraft-cli convert <in> <out> [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>] [--dpx-bits <8|10|12|16>] [--dds-compression <none|bc1|bc2|bc3>] [--dds-mipmaps] [PDF flags]
       Convert between formats (.pcraft, .psd, .png, .jpg, .tif, .webp, .exr, …).
       TIFF output is flat unless --tiff-layers keeps the layers (Photoshop layer data).
       --quality sets the JPEG or WebP quality; a WebP written with a quality is lossy, without one lossless.
@@ -24,8 +24,15 @@ USAGE:
       --dpx-bits sets a DPX's bits per sample. Without it: 8 for an 8-bit document, else 16.
       --dds-compression sets a DDS texture's compression: none (uncompressed, the default), bc1
       (DXT1: alpha on or off), bc2 (DXT3) or bc3 (DXT5). --dds-mipmaps also writes the full mip chain.
-  photocraft-cli info <file> [--compact]
+      A PDF input opens as Photoshop's Import PDF does; the PDF flags below choose how.
+  photocraft-cli info <file> [--compact] [PDF flags]
       Print the document as JSON (size, mode, depth, layer tree).
+  PDF flags (convert and info; other files ignore them):
+      [--page <n>] [--image <n>] [--resolution <ppi>] [--crop <boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox>]
+      [--mode <rgb|gray|cmyk|lab>] [--depth <8|16>] [--no-antialias]
+      --page opens page n (from 1; default 1), --image embedded image n instead of a page (Images
+      mode). --resolution defaults to 300 ppi, --crop to boundingBox, --mode to rgb, --depth to 8;
+      --no-antialias renders without anti-aliasing.
   photocraft-cli run (<file> | --new <json>) --cmd <id> [--params <json>] [--cmd …] [--out <file>] [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tga-bits <24|32>] [--dpx-bits <8|10|12|16>] [--dds-compression <none|bc1|bc2|bc3>] [--dds-mipmaps]
       Open a file, run engine commands in order, save the result. Each --params
       applies to the preceding --cmd. Prints each command's JSON result.
@@ -848,5 +855,21 @@ mod batch_action_set_tests {
             assert_eq!((info["width"].as_u64(), info["height"].as_u64()), (Some(6), Some(8)), "{action}: rotated once, the unchecked step skipped");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    /// The help text lists every flag a subcommand takes (the PDF import flags of `convert` and
+    /// `info` among them), so `--help` never hides one.
+    #[test]
+    fn usage_lists_every_flag_a_subcommand_takes() {
+        for sub in SUBCOMMANDS {
+            for flag in sub.values.iter().chain(sub.bare) {
+                assert!(USAGE.contains(&format!("[{flag}")) || USAGE.contains(&format!("{flag} ")), "{} takes {flag}, which USAGE doesn't list", sub.name);
+            }
+        }
     }
 }

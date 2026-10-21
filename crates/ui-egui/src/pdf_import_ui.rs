@@ -74,8 +74,8 @@ pub struct PdfImport {
 
 /// Whether `bytes` should open through this dialog: a PDF, unless it is the one-image kind
 /// Photoshop opens like a picture without asking.
-pub fn wants_dialog(bytes: &[u8]) -> bool {
-    pdf_import::is_pdf(bytes) && (pdf_import::needs_password(bytes) || !pdf_import::opens_as_image(bytes, None))
+pub fn wants_dialog(name: &str, bytes: &[u8]) -> bool {
+    photocraft_io::is_pdf_input(name, bytes) && (pdf_import::needs_password(bytes) || !pdf_import::opens_as_image(bytes, None))
 }
 
 /// Whether `fields` are this dialog's.

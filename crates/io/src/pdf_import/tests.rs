@@ -392,7 +392,7 @@ fn images_mode_lists_and_opens_the_embedded_images() {
     let d = &r.document;
     assert_eq!((d.name.as_str(), d.size.width, d.size.height, d.mode), ("pair-2", 64, 64, ColorMode::Grayscale));
     assert_eq!(d.layers[0].name, "Background");
-    assert!(!r.source_read_only);
+    assert!(r.source_read_only, "untitled, as in Photoshop: not tied to the PDF");
     let r = import_pdf("pair.pdf", &two, &PdfOpenOptions { image: Some(1), name: Some("Foo.pdf".into()), ..Default::default() }, &Interrupt::NONE).unwrap();
     assert_eq!((r.document.name.as_str(), r.document.size.width, r.document.resolution_dpi), ("Foo-1", 100, 36.0));
     assert!(import_pdf("pair.pdf", &two, &PdfOpenOptions { image: Some(3), ..Default::default() }, &Interrupt::NONE).is_err());
@@ -729,4 +729,294 @@ fn inline_images_count_toward_the_page_total() {
     assert!(passes(&xobject_pdf(&[(form, three.as_bytes())], 1, b"")));
     let e = refused(&xobject_pdf(&[(form, three.as_bytes())], 1, b"q /X0 Do Q q /X0 Do Q"), "form twice");
     assert!(e.contains("together"), "{e}");
+}
+
+// ---- CCITT and JBIG2: sized from their parameters and segment headers, not the dictionary. ----
+
+/// A one-page PDF: objects 5.. are `more`, the page has `resources` and `page_extra` (which may
+/// give its own `/Contents`), and its content stream (object 4) has `content_dict` entries.
+fn objects_pdf(resources: &str, page_extra: &str, content_dict: &str, content: &[u8], more: Vec<Vec<u8>>) -> Vec<u8> {
+    let contents = if page_extra.contains("/Contents") { "" } else { "/Contents 4 0 R" };
+    let mut objs = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << {resources} >> {contents} {page_extra} >>").into_bytes(),
+        stream(content_dict, content),
+    ];
+    objs.extend(more);
+    write(objs)
+}
+
+const CCITT_10: &str = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode";
+
+#[test]
+fn a_ccitt_image_is_sized_by_its_decode_parameters() {
+    // 10 × 10 px declared, /Columns × /Rows 20000 × 20000: the decoder allocates that up front.
+    let parms = |cols: u32, rows: u32| format!("{CCITT_10} /DecodeParms << /K -1 /Columns {cols} /Rows {rows} >>");
+    let big = xobject_pdf(&[(&parms(20000, 20000), &[0u8; 8])], 1, DRAW_X0);
+    let e = refused(&big, "ccitt");
+    assert!(e.contains("CCITT") && e.contains("20000 × 20000"), "{e}");
+    assert!(thumbnail(&big, 1, 64, None).is_err() && import_image("big.pdf", &big, 1, None, None, &Interrupt::NONE).is_err());
+    // /Rows smaller than /Height: the height counts; no /Columns: 1728.
+    let tall = "/Type /XObject /Subtype /Image /Width 10 /Height 9000 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 8000 /Rows 1 >>";
+    let e = refused(&xobject_pdf(&[(tall, &[0u8; 8])], 1, DRAW_X0), "height");
+    assert!(e.contains("8000 × 9000"), "{e}");
+    assert!(passes(&xobject_pdf(&[(CCITT_10, &[0u8; 8])], 1, DRAW_X0)), "1728 × 10 by default");
+    assert!(passes(&xobject_pdf(&[(&parms(10, 10), &[0u8; 8])], 1, DRAW_X0)));
+    // Behind another filter, its own parameters in the array.
+    let chained = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter [/FlateDecode /CCITTFaxDecode] /DecodeParms [null << /K -1 /Columns 20000 /Rows 20000 >>]";
+    let e = refused(&xobject_pdf(&[(chained, &[0u8; 8])], 1, DRAW_X0), "chained");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    // An inline image and an inline stencil, abbreviated.
+    let e = refused(&xobject_pdf(&[], 0, &inline("/W 10 /H 10 /CS /G /BPC 1 /F /CCF /DP << /K -1 /Columns 20000 /Rows 20000 >>", &[0u8; 8])), "inline");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    let e = refused(&xobject_pdf(&[], 0, &inline("/W 10 /H 10 /IM true /F /CCF /DP << /K -1 /Columns 20000 /Rows 20000 >>", &[0u8; 8])), "stencil");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    // A CCITT soft mask.
+    let masked = "/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 6 0 R";
+    let e = refused(&xobject_pdf(&[(masked, &[0u8; 48]), (&parms(20000, 20000), &[0u8; 8])], 1, DRAW_X0), "mask");
+    assert!(e.contains("soft mask") && e.contains("20000 × 20000"), "{e}");
+}
+
+/// One JBIG2 segment (embedded organisation): `number`, `kind`, no referred-to segments, page 1,
+/// `data`.
+fn seg(number: u32, kind: u8, data: &[u8]) -> Vec<u8> {
+    let mut s = number.to_be_bytes().to_vec();
+    s.extend_from_slice(&[kind, 0, 1]);
+    s.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    s.extend_from_slice(data);
+    s
+}
+
+/// A page information segment's data for `w × h`.
+fn jbig2_page_info(w: u32, h: u32) -> Vec<u8> {
+    let mut d = w.to_be_bytes().to_vec();
+    d.extend_from_slice(&h.to_be_bytes());
+    d.extend_from_slice(&[0; 8]);
+    d.extend_from_slice(&[0, 0, 0]);
+    d
+}
+
+/// Region segment information for a `w × h` bitmap at the origin, then a generic region's flags
+/// (MMR off, template 0) and its four adaptive pixels, then `coded`.
+fn region(w: u32, h: u32, coded: &[u8]) -> Vec<u8> {
+    let mut d = w.to_be_bytes().to_vec();
+    d.extend_from_slice(&h.to_be_bytes());
+    d.extend_from_slice(&[0; 8]);
+    d.push(0);
+    d.push(0);
+    d.extend_from_slice(&[3, 0xFF, 0xFD, 0xFF, 2, 0xFE, 0xFE, 0xFE]);
+    d.extend_from_slice(coded);
+    d
+}
+
+const JBIG2_10: &str = "/Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode";
+
+#[test]
+fn a_jbig2_image_is_sized_by_its_segments() {
+    let jbig2 = |segments: &[Vec<u8>]| xobject_pdf(&[(JBIG2_10, &segments.concat())], 1, DRAW_X0);
+    // The page information gives the size the decoder builds, whatever the dictionary says.
+    let big = jbig2(&[seg(0, 48, &jbig2_page_info(20000, 20000)), seg(1, 49, &[])]);
+    let e = refused(&big, "page");
+    assert!(e.contains("JBIG2") && e.contains("20000 × 20000"), "{e}");
+    assert!(thumbnail(&big, 1, 64, None).is_err() && import_image("big.pdf", &big, 1, None, None, &Interrupt::NONE).is_err());
+    // Within the dictionary's size it passes; the data then decides.
+    let small = jbig2(&[seg(0, 48, &jbig2_page_info(10, 10)), seg(1, 38, &region(10, 10, &[0; 4])), seg(2, 49, &[])]);
+    assert!(passes(&small));
+    assert!(import_pdf("small.pdf", &small, &PdfOpenOptions::default(), &Interrupt::NONE).is_ok());
+    // A region bigger than the limits, an unknown height without stripes, stripes past it.
+    let e = refused(&jbig2(&[seg(0, 48, &jbig2_page_info(10, 10)), seg(1, 38, &region(20000, 20000, &[0; 4]))]), "region");
+    assert!(e.contains("region segment"), "{e}");
+    let e = refused(&jbig2(&[seg(0, 48, &jbig2_page_info(20000, u32::MAX))]), "unknown height");
+    assert!(e.contains("height is unknown"), "{e}");
+    let e = refused(&jbig2(&[seg(0, 48, &jbig2_page_info(20000, u32::MAX)), seg(1, 50, &19_999u32.to_be_bytes())]), "stripes");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    // Symbol and halftone coding take their bitmaps' sizes from the coded data: refused.
+    for kind in [0, 6, 16, 22] {
+        let e = refused(&jbig2(&[seg(0, 48, &jbig2_page_info(10, 10)), seg(1, kind, &[0; 32])]), "symbols");
+        assert!(e.contains("symbol or halftone"), "{kind}: {e}");
+    }
+    // Headers that can't be read: refused, not decoded.
+    let e = refused(&jbig2(&[seg(0, 48, &jbig2_page_info(10, 10))[..6].to_vec()]), "truncated");
+    assert!(e.contains("can't be checked"), "{e}");
+    let e = refused(&jbig2(&[seg(0, 48, &jbig2_page_info(10, 10)), seg(1, 55, &[])]), "unknown type");
+    assert!(e.contains("unknown type"), "{e}");
+    let e = refused(
+        &xobject_pdf(&[(&JBIG2_10.replace("/JBIG2Decode", "[/FlateDecode /JBIG2Decode]"), &seg(0, 48, &jbig2_page_info(10, 10)))], 1, DRAW_X0),
+        "chained",
+    );
+    assert!(e.contains("JBIG2Decode isn't its only filter"), "{e}");
+    // The walk follows the header forms: a 2-byte referred-to number and a 4-byte page
+    // association (segment 300), and a region of unknown length that ends at its marker; the big
+    // region after each is found.
+    let mut long = 300u32.to_be_bytes().to_vec();
+    long.extend_from_slice(&[0x40 | 62, 0x20, 0x00, 0x01, 0, 0, 0, 1, 0, 0, 0, 2, 0xAA, 0xBB]);
+    let e = refused(&jbig2(&[seg(1, 48, &jbig2_page_info(10, 10)), long, seg(301, 38, &region(20000, 20000, &[]))]), "long header");
+    assert!(e.contains("region segment"), "{e}");
+    let mut unknown = 2u32.to_be_bytes().to_vec();
+    unknown.extend_from_slice(&[38, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF]);
+    unknown.extend(region(10, 10, &[1, 2, 3, 0xFF, 0xAC, 0, 0, 0, 10]));
+    let e = refused(&jbig2(&[seg(1, 48, &jbig2_page_info(10, 10)), unknown, seg(3, 38, &region(20000, 20000, &[]))]), "unknown length");
+    assert!(e.contains("region segment"), "{e}");
+    // The globals count: a page information there, and they must not go through an image codec.
+    let globals = |dict: &str| {
+        xobject_pdf(
+            &[(&format!("{JBIG2_10} /DecodeParms << /JBIG2Globals 6 0 R >>"), &seg(2, 49, &[])), (dict, &seg(0, 48, &jbig2_page_info(20000, 20000)))],
+            1,
+            DRAW_X0,
+        )
+    };
+    let e = refused(&globals(""), "globals");
+    assert!(e.contains("20000 × 20000"), "{e}");
+    let e = refused(&globals("/Filter /JPXDecode"), "globals codec");
+    assert!(e.contains("JBIG2Globals") || e.contains("JPXDecode"), "{e}");
+}
+
+// ---- Streams that aren't images may not go through an image codec. ----
+
+#[test]
+fn a_stream_that_isnt_an_image_may_not_use_an_image_codec() {
+    let jpx = jpx_header_only(9000, 9000, 1);
+    let check = |bytes: &[u8], what: &str, needle: &str| {
+        let e = refused(bytes, what);
+        assert!(e.contains(needle) && e.contains("isn't an image"), "{what}: {e}");
+        assert!(thumbnail(bytes, 1, 64, None).is_err(), "{what}: thumbnail");
+        assert!(bounding_box(bytes, 1, None).is_err(), "{what}: bounding box");
+        assert!(images(bytes, None).is_err(), "{what}: Images mode list");
+        assert!(!opens_as_image(bytes, None), "{what}: image-only check");
+    };
+    // The page's content, alone or in an array.
+    check(&objects_pdf("", "", "/Filter /JPXDecode", &jpx, vec![]), "contents", "JPXDecode");
+    let arr = objects_pdf("", "/Contents [4 0 R 5 0 R]", "", b"0 0 1 rg 0 0 10 10 re f", vec![stream("/Filter /DCTDecode", &[0xFF, 0xD8])]);
+    check(&arr, "contents array", "DCTDecode");
+    // A Form XObject the page never draws.
+    check(
+        &objects_pdf("/XObject << /F 5 0 R >>", "", "", b"", vec![stream("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Filter /JPXDecode", &jpx)]),
+        "form",
+        "JPXDecode",
+    );
+    // A tiling pattern, a Type 3 glyph, a soft-mask group, a font program, an ICC profile.
+    check(
+        &objects_pdf(
+            "/Pattern << /P 5 0 R >>",
+            "",
+            "",
+            b"",
+            vec![stream("/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Filter /CCITTFaxDecode", &[0; 8])],
+        ),
+        "pattern",
+        "CCITTFaxDecode",
+    );
+    check(
+        &objects_pdf(
+            "/Font << /T3 5 0 R >>",
+            "",
+            "",
+            b"",
+            vec![
+                b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 10 10] /FontMatrix [0.1 0 0 0.1 0 0] /CharProcs << /a 6 0 R >> /Encoding << /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [10] >>".to_vec(),
+                stream("/Filter /JBIG2Decode", &[0; 8]),
+            ],
+        ),
+        "type 3",
+        "JBIG2Decode",
+    );
+    check(
+        &objects_pdf(
+            "/ExtGState << /G0 << /SMask << /S /Luminosity /G 5 0 R >> >> >>",
+            "",
+            "",
+            b"",
+            vec![stream("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Filter /JPXDecode", &jpx)],
+        ),
+        "soft mask group",
+        "JPXDecode",
+    );
+    check(
+        &objects_pdf(
+            "/Font << /F 5 0 R >>",
+            "",
+            "",
+            b"",
+            vec![
+                b"<< /Type /Font /Subtype /TrueType /BaseFont /X /FontDescriptor 6 0 R >>".to_vec(),
+                b"<< /Type /FontDescriptor /FontName /X /Flags 32 /FontFile2 7 0 R >>".to_vec(),
+                stream("/Filter /JPXDecode", &jpx),
+            ],
+        ),
+        "font file",
+        "/FontFile2",
+    );
+    check(&objects_pdf("/ColorSpace << /CS [/ICCBased 5 0 R] >>", "", "", b"", vec![stream("/N 3 /Filter /DCTDecode", &[0xFF, 0xD8])]), "icc", "DCTDecode");
+    // An annotation's appearance.
+    check(
+        &objects_pdf(
+            "",
+            "/Annots [<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] /AP << /N 5 0 R >> >>]",
+            "",
+            b"",
+            vec![stream("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Filter /JPXDecode", &jpx)],
+        ),
+        "appearance",
+        "JPXDecode",
+    );
+    // A stream that calls itself an image is one only where the interpreter decodes an image: as
+    // a pattern it is content.
+    check(
+        &objects_pdf("/Pattern << /P 5 0 R >>", "", "", b"", vec![stream("/Type /XObject /Subtype /Image /PatternType 1 /Filter /JPXDecode", &jpx)]),
+        "image as pattern",
+        "JPXDecode",
+    );
+    // Images may: a JPX image beside an ICC profile in Flate passes.
+    let ok = objects_pdf(
+        "/XObject << /X0 5 0 R >> /ColorSpace << /CS [/ICCBased 6 0 R] >>",
+        "",
+        "",
+        DRAW_X0,
+        vec![stream(JPX_10, &J2K_GRAY_2X2), stream("/N 1 /Filter /FlateDecode", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01])],
+    );
+    assert!(passes(&ok));
+    assert!(opens_as_image(&ok, None));
+}
+
+#[test]
+fn a_walk_past_its_limits_refuses_the_page() {
+    // An array that holds itself ends the walk (the reader cuts the cycle).
+    assert!(passes(&objects_pdf("/Properties << /P 5 0 R >>", "", "", b"", vec![b"[5 0 R 5 0 R]".to_vec()])));
+    // 25 arrays each holding the next twice: 2^25 paths, refused at the object limit instead of
+    // walked.
+    let more: Vec<Vec<u8>> = (5..30).map(|k| format!("[{} 0 R {} 0 R]", k + 1, k + 1).into_bytes()).chain([b"[]".to_vec()]).collect();
+    let e = refused(&objects_pdf("/Properties << /P 5 0 R >>", "", "", b"", more), "doubling");
+    assert!(e.contains("too deep or hold too many objects"), "{e}");
+}
+
+// ---- What opening a PDF ties to the file, and which files open as PDFs. ----
+
+#[test]
+fn only_a_one_image_pdf_opened_directly_keeps_the_file() {
+    let one = image_pdf(200.0, 100.0, &[(100, 50, false, "200 0 0 100 0 0")], "");
+    let two = image_pdf(400.0, 300.0, &[(100, 50, false, "200 0 0 100 20 150"), (64, 64, true, "64 0 0 64 300 50")], "");
+    let plain = |b: &[u8]| crate::import("f.pdf", b).unwrap().source_read_only;
+    let chosen = |b: &[u8], o: PdfOpenOptions| {
+        crate::import_with_options("f.pdf", b, &crate::ImportOptions { pdf: Some(o), ..Default::default() }).unwrap().source_read_only
+    };
+    assert!(!plain(&one), "a one-image PDF opens like a picture");
+    assert!(plain(&two), "a page is rasterised");
+    assert!(chosen(&two, PdfOpenOptions { image: Some(1), ..Default::default() }), "Images mode");
+    assert!(chosen(&two, PdfOpenOptions::default()), "a page chosen in Import PDF");
+    assert!(chosen(&one, PdfOpenOptions::default()), "anything Import PDF opens");
+}
+
+#[test]
+fn a_file_opens_as_a_pdf_when_it_starts_like_one_or_nothing_else_takes_it() {
+    let svg = b"<?xml version=\"1.0\"?>\n<!-- exported from %PDF-1.4 source -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"4\"><rect width=\"8\" height=\"4\" fill=\"red\"/></svg>";
+    assert!(is_pdf(svg) && !crate::is_pdf_input("drawing.svg", svg) && !crate::is_pdf_input("drawing", svg));
+    let r = crate::import("drawing.svg", svg).expect("opens as an SVG, as before PDF import existed");
+    assert_eq!((r.document.size.width, r.document.size.height), (8, 4));
+    // A PDF after a byte-order mark or a shell line still opens as one.
+    let mut bom = b"\xef\xbb\xbf".to_vec();
+    bom.extend(pdf(&[page(72.0, 72.0, &rect(0.0, 0.0, 72.0, 72.0, (0.0, 0.0, 0.0)))]));
+    assert!(crate::is_pdf_input("x.pdf", &bom));
+    assert!(crate::import("x.pdf", &bom).is_ok());
+    assert!(crate::is_pdf_input("x", b"%PDF-1.7\n"));
 }

@@ -375,14 +375,26 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
         return raw::import_raw(name, bytes);
     }
     // A PDF opens through the Import PDF options (a plain `import` takes Photoshop's defaults).
-    if pdf_import::is_pdf(bytes) {
-        let defaults = pdf_import::PdfOpenOptions::default();
-        return pdf_import::import_pdf(name, bytes, opts.pdf.as_ref().unwrap_or(&defaults), ctl);
+    if is_pdf_input(name, bytes) {
+        let Some(chosen) = opts.pdf.as_ref() else { return pdf_import::import_pdf(name, bytes, &pdf_import::PdfOpenOptions::default(), ctl) };
+        // What Import PDF answers open (a page, an embedded image) is untitled, as in Photoshop:
+        // only a one-image PDF opened directly, like a picture, takes the PDF as its file.
+        let mut r = pdf_import::import_pdf(name, bytes, chosen, ctl)?;
+        r.source_read_only = true;
+        return Ok(r);
     }
     if is_svg_input(name, bytes) {
         return svg::import_svg_with_group_depth(name, bytes, max_group_depth);
     }
     flat::import_flat(name, bytes)
+}
+
+/// Whether `name`'s `bytes` open as a PDF: a file that starts with `%PDF-`, or one with the marker
+/// later in its first kilobyte (after a byte-order mark or a shell line, as the specification
+/// allows) that the SVG and raster importers don't take (an SVG may mention `%PDF-1.4` in a
+/// comment near its start).
+pub fn is_pdf_input(name: &str, bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-") || (pdf_import::is_pdf(bytes) && !is_svg_input(name, bytes) && photocraft_codecs::detect(bytes).is_none())
 }
 
 /// Extension names can be wrong (for example, an image downloaded as WebP and renamed `.svg`).

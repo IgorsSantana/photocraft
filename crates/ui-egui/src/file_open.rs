@@ -83,7 +83,7 @@ impl PhotocraftApp {
             return r.map(|()| Vec::new());
         }
         // A PDF asks how to open first (Import PDF), as Photoshop does.
-        if crate::pdf_import_ui::wants_dialog(bytes) {
+        if crate::pdf_import_ui::wants_dialog(path, bytes) {
             return crate::pdf_import_ui::open(self, &display_name(path), Some(path), bytes).map(|_| Vec::new());
         }
         if self.background_jobs {

@@ -420,6 +420,15 @@ pub(crate) fn saved_revision_after_write(confirmed: bool, written: u64, previous
     if confirmed { written } else { previous }
 }
 
+/// Whether a document opened from `name`'s `bytes` with `opts` must stay untitled rather than
+/// take the PDF as its file, as Photoshop leaves it: a rasterised page, or anything Import PDF
+/// opened (a page or an embedded image). Only a one-image PDF opened directly, like a picture,
+/// keeps the PDF. (The importer says the same through `source_read_only`, which the import hook
+/// doesn't pass on.)
+fn pdf_untitled(name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions) -> bool {
+    photocraft_io::is_pdf_input(name, bytes) && (opts.pdf.is_some() || !photocraft_io::pdf_import::opens_as_image(bytes, None))
+}
+
 /// Who a finished save serves.
 #[derive(Clone, Copy)]
 pub(crate) enum SaveKind {
@@ -1451,7 +1460,7 @@ impl PhotocraftApp {
             return r.map(|()| Vec::new());
         }
         // A PDF asks how to open first (Import PDF), as Photoshop does.
-        if pdf_import_ui::wants_dialog(bytes) {
+        if pdf_import_ui::wants_dialog(name, bytes) {
             return pdf_import_ui::open(self, name, path, bytes).map(|_| Vec::new());
         }
         let opts = photocraft_engine::jobs::import_options(self.session.prefs());
@@ -1469,12 +1478,7 @@ impl PhotocraftApp {
         }
         let import = self.services.import.as_ref().ok_or("no importer configured")?;
         let (doc, warnings) = import(name, bytes, &opts)?;
-        // The importer's `source_read_only` doesn't travel through the hook: a rasterised PDF
-        // page (not a one-image PDF or an embedded image, which open like pictures) must not
-        // take the PDF as its Save path, as Photoshop's doesn't.
-        let pdf_page = photocraft_io::pdf_import::is_pdf(bytes)
-            && opts.pdf.as_ref().is_none_or(|o| o.image.is_none())
-            && !photocraft_io::pdf_import::opens_as_image(bytes, opts.pdf.as_ref().and_then(|o| o.password.as_deref()));
+        let pdf_page = pdf_untitled(name, bytes, &opts);
         // Edit › Color Settings policies apply on open; Ask When Opening holds the file back
         // until its prompt is answered, and later files wait behind it (`open_prompt`).
         // Missing fonts are read from the document itself: it may not be open yet (#4559).
@@ -1528,7 +1532,7 @@ impl PhotocraftApp {
         // The caller records the path it read from.
         self.session.add_document(doc, None);
         if let Some(st) = self.session.active_mut() {
-            st.source_read_only = photocraft_io::affinity::is_affinity(bytes);
+            st.source_read_only = photocraft_io::affinity::is_affinity(bytes) || pdf_untitled(name, bytes, &opts);
         }
         self.sync_views();
         self.ui.status = crate::i18n::fmt(tl!("Opened {name}"), &[("name", name)]);

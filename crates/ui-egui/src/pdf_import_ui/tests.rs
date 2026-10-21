@@ -230,7 +230,7 @@ fn ok_with_nothing_selected_keeps_the_dialog_up() {
 #[test]
 fn a_one_image_pdf_opens_like_an_image_without_asking() {
     let mut app = app();
-    assert!(!wants_dialog(&image_pdf(100, 50, 200.0)));
+    assert!(!wants_dialog("scan.pdf", &image_pdf(100, 50, 200.0)));
     app.open_file("/tmp/pc-test/scan.pdf", &image_pdf(100, 50, 200.0)).expect("open");
     assert!(dialog(&app).is_none());
     let st = app.session.active().expect("the image document");
@@ -239,9 +239,8 @@ fn a_one_image_pdf_opens_like_an_image_without_asking() {
     assert!(!st.source_read_only && st.path.as_deref() == Some("/tmp/pc-test/scan.pdf"), "like any image file");
 }
 
-#[test]
-fn images_mode_opens_the_embedded_images() {
-    // Two pages: the second draws an image beside a rectangle, so the file isn't image-only.
+/// Two pages: the second draws an 8 × 4 image beside a rectangle, so the file isn't image-only.
+fn pair_pdf() -> Vec<u8> {
     let px: Vec<u8> = (0..8 * 4 * 3).map(|k| (k % 251) as u8).collect();
     let mut img = format!("<< /Type /XObject /Subtype /Image /Width 8 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n", px.len())
         .into_bytes();
@@ -258,9 +257,13 @@ fn images_mode_opens_the_embedded_images() {
         format!("<< /Length {} >>\nstream\n{c2}\nendstream", c2.len()).into_bytes(),
         img,
     ];
-    let bytes = write(objs);
+    write(objs)
+}
+
+#[test]
+fn images_mode_opens_the_embedded_images() {
     let mut app = app();
-    app.open_bytes("pair.pdf", &bytes).expect("open");
+    app.open_bytes("pair.pdf", &pair_pdf()).expect("open");
     let id = dialog(&app).unwrap().id;
     set(&mut app, "select", json!("images"));
     set(&mut app, "images", json!([1]));
@@ -268,6 +271,52 @@ fn images_mode_opens_the_embedded_images() {
     let doc = &app.session.active().unwrap().doc;
     assert_eq!((doc.name.as_str(), doc.size.width, doc.size.height), ("pair-1", 8, 4));
     assert_eq!(doc.layers[0].name, "Background");
+}
+
+#[test]
+fn what_import_pdf_opens_from_a_file_stays_untitled() {
+    let dir = std::env::temp_dir().join(format!("photocraft-pdf-untitled-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pair.pdf").to_string_lossy().into_owned();
+    std::fs::write(&path, pair_pdf()).unwrap();
+    let ctx = egui::Context::default();
+    // Opened here, then on a worker: the image (Images mode), then page 2.
+    for background in [false, true] {
+        let mut app = app();
+        app.background_jobs = background;
+        for (select, key) in [("images", "images"), ("pages", "pages")] {
+            app.open_path(&path).expect("open");
+            let id = dialog(&app).expect("Import PDF asks every time").id;
+            set(&mut app, "select", json!(select));
+            set(&mut app, key, json!([if select == "images" { 1 } else { 2 }]));
+            crate::dialogs::confirm(&mut app, id).expect("OK");
+            for _ in 0..400 {
+                crate::jobs_ui::tick(&mut app, &ctx);
+                if app.jobs.opens.is_empty() && !app.session.has_jobs() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let st = app.session.active().expect("the opened document");
+            assert!(st.path.is_none() && st.source_read_only, "{select} (background {background}): Save must not write into the PDF");
+            assert!(app.ui.recent_files.iter().any(|p| p.ends_with("pair.pdf")), "the PDF goes to Open Recent");
+        }
+        let names: Vec<&str> = app.session.documents().iter().map(|d| d.doc.name.as_str()).collect();
+        assert_eq!(names, ["pair-1", "pair-2.pdf"], "background {background}: the second open asked again instead of switching tabs");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_svg_mentioning_pdf_opens_as_an_svg() {
+    let svg = b"<?xml version=\"1.0\"?>\n<!-- exported from %PDF-1.4 source -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"4\"><rect width=\"8\" height=\"4\" fill=\"red\"/></svg>";
+    assert!(!wants_dialog("drawing.svg", svg));
+    let mut app = app();
+    app.open_file("/tmp/pc-test/drawing.svg", svg).expect("open");
+    assert!(dialog(&app).is_none());
+    let st = app.session.active().expect("the SVG document");
+    assert_eq!((st.doc.size.width, st.doc.size.height), (8, 4));
+    assert_eq!(st.path.as_deref(), Some("/tmp/pc-test/drawing.svg"));
 }
 
 #[test]
