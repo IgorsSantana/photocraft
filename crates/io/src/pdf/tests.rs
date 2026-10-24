@@ -129,3 +129,25 @@ fn other_modes_are_refused_with_an_actionable_error() {
     assert!(e.contains("RGB") && e.contains("Mode"), "{e}");
     assert!(crate::export(&d, "x.pdf", &crate::ExportOptions::default()).is_err());
 }
+
+/// A PDF saved by PhotoCraft can be reopened through the same importer as external PDFs.
+#[test]
+fn exported_pdf_reopens_at_its_print_size_with_the_page_pixels() {
+    let mut original = doc(ColorMode::Rgb);
+    original.resolution_dpi = 72.0;
+    let fmt = original.pixel_format();
+    original.layers.push(Layer::new("Green", LayerContent::Raster(solid(fmt, 0, 0, 4, 2, &[0.0, 1.0, 0.0, 1.0]))));
+    let exported = crate::export(&original, "roundtrip.pdf", &crate::ExportOptions::default()).unwrap();
+    let options = crate::ImportOptions {
+        pdf: Some(crate::pdf_import::PdfOpenOptions { resolution: 72.0, crop: crate::pdf_import::CropTo::MediaBox, ..Default::default() }),
+        ..Default::default()
+    };
+    let reopened = crate::import_with_options("roundtrip.pdf", &exported.bytes, &options).unwrap();
+    assert_eq!(reopened.document.size, original.size);
+    assert_eq!(reopened.document.layers.len(), 1, "PDF export is flattened");
+    assert!(reopened.source_read_only, "imported pages require a new save destination");
+    let pixel = photocraft_compose::render(&reopened.document, Rect::new(1, 0, 2, 1)).px[0];
+    for (actual, expected) in pixel.into_iter().zip([0.0, 1.0, 0.0, 1.0]) {
+        assert!((actual - expected).abs() < 0.01, "exported page appearance survives import");
+    }
+}

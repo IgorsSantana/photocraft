@@ -18,7 +18,7 @@ mod recovery_tests;
 /// Photoshop brushes (.abr), gradients (.grd), layer styles (.asl), swatches (.aco, .act, .ase) and keyboard shortcut sets
 /// (.kys), which go to the preset libraries and Edit › Keyboard Shortcuts.
 const OPEN_EXTS: &[&str] = &[
-    "pcraft", "pdn", "ora", "xcf", "xcfgz", "gz", "kra", "krz", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico",
+    "pcraft", "pdn", "ora", "xcf", "xcfgz", "gz", "kra", "krz", "psd", "psb", "psdt", "pdf", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico",
     "qoi", "exr", "hdr", "pbm", "pgm", "ppm", "pam", "pfm", "pcx", "dds", "xpm", "fits", "fit", "fts", "dpx", "cin", "dcm", "dicom", "dc3", "iff", "lbm",
     "ilbm", "heic", "heif", "hif", "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf", "abr", "grd", "asl", "svg", "svgz", "aco", "act",
     "ase", "kys", "af", "afdesign", "afphoto", "afpub",
@@ -42,6 +42,7 @@ fn open_filter_extensions(extensions: &[&str]) -> Vec<String> {
 const OPEN_FILTERS: &[(&str, &[&str])] = &[
     ("PhotoCraft", &["pcraft"]),
     ("Photoshop", &["psd", "psb", "psdt"]),
+    ("PDF", &["pdf"]),
     ("Affinity", &["af", "afdesign", "afphoto", "afpub"]),
     ("Krita", &["kra", "krz"]),
     ("GIMP", &["xcf", "xcfgz", "gz"]),
@@ -894,9 +895,17 @@ mod tests {
         all.sort_unstable();
         assert_eq!(named, all, "the named filters cover All Formats exactly");
         let names: Vec<&str> = filters.iter().map(|(name, _)| *name).collect();
-        for name in ["Photoshop", "Affinity", "HEIF", "PNG", "JPEG", "TIFF", "Portable Bitmap", "OpenEXR", "Radiance HDR", "Paint.NET"] {
+        for name in ["Photoshop", "PDF", "Affinity", "HEIF", "PNG", "JPEG", "TIFF", "Portable Bitmap", "OpenEXR", "Radiance HDR", "Paint.NET"] {
             assert!(names.contains(&name), "{name}");
         }
+    }
+
+    #[test]
+    fn pdf_is_discoverable_in_all_formats_and_its_named_filter() {
+        let filters = open_filters();
+        let pdf = open_filter_extensions(&["pdf"]);
+        assert!(pdf.iter().all(|extension| filters[0].1.contains(extension)));
+        assert_eq!(filters.iter().find(|(name, _)| *name == "PDF").map(|(_, extensions)| extensions), Some(&pdf));
     }
 
     #[cfg(not(all(unix, not(target_os = "macos"))))]
