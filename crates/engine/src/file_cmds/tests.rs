@@ -1771,3 +1771,128 @@ fn sanitize_keeps_windows_device_names_off_the_disk() {
         assert_eq!(sanitize(name), name);
     }
 }
+
+/// Writes a two-page PDF: page 1 a red square, page 2 a 2 × 2 grey image beside a blue one.
+fn pdf_file(dir: &str, name: &str) -> String {
+    let c1 = "1 0 0 rg 0 0 50 50 re f";
+    let c2 = "q 40 0 0 40 10 10 cm /Im0 Do Q 0 0 1 rg 60 60 10 10 re f";
+    let mut objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>".to_vec(),
+        format!("<< /Length {} >>\nstream\n{c1}\nendstream", c1.len()).into_bytes(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im0 7 0 R >> >> /Contents 6 0 R >>".to_vec(),
+        format!("<< /Length {} >>\nstream\n{c2}\nendstream", c2.len()).into_bytes(),
+    ];
+    let mut img = b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\nstream\n".to_vec();
+    img.extend_from_slice(&[10, 200, 90, 30]);
+    img.extend_from_slice(b"\nendstream");
+    objs.push(img);
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    let path = join(dir, name);
+    std::fs::write(&path, out).unwrap();
+    path
+}
+
+/// Bad Import PDF answers are refused, naming the parameter, before anything opens or is placed.
+#[test]
+fn bad_pdf_options_are_refused_before_opening_or_placing() {
+    let dir = tmp("pdf-options");
+    let pdf = pdf_file(&dir, "doc.pdf");
+    let bad = [
+        ("page", json!(0)),
+        ("page", json!("two")),
+        ("image", json!(0)),
+        ("image", json!(-1)),
+        ("resolution", json!(-72)),
+        ("resolution", json!("high")),
+        ("crop", json!("pageBox")),
+        ("crop", json!(3)),
+        ("mode", json!("hsb")),
+        ("depth", json!(32)),
+        ("depth", json!("8")),
+        ("antiAlias", json!("yes")),
+        ("suppressWarnings", json!(1)),
+    ];
+    let mut s = session(100, 100, 8);
+    let (count, revision, layers) = (s.documents().len(), s.active().unwrap().revision, doc(&s).layers.len());
+    for (key, value) in bad {
+        let e = s.execute("file.openAs", json!({"path": pdf, key: value})).expect_err("openAs refuses");
+        assert!(e.to_string().starts_with(key), "openAs {key} = {value}: {e}");
+        for cmd in ["file.placeEmbedded", "file.placeLinked"] {
+            let e = s.execute(cmd, json!({"path": pdf, key: value})).expect_err("place refuses");
+            assert!(e.to_string().starts_with(key), "{cmd} {key} = {value}: {e}");
+        }
+        assert_eq!(s.documents().len(), count, "{key}: nothing opened");
+        assert_eq!(s.active_index(), Some(0));
+        assert_eq!((s.active().unwrap().revision, doc(&s).layers.len()), (revision, layers), "{key}: nothing placed");
+    }
+    // Good answers open and place.
+    s.execute("file.placeEmbedded", json!({"path": pdf, "page": 2, "resolution": 72})).unwrap();
+    assert_eq!(doc(&s).layers.len(), layers + 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A page or an embedded image opened with Import PDF answers is untitled (not tied to the PDF
+/// for Save), as in Photoshop; so is a rasterised page opened with the defaults.
+#[test]
+fn pdf_pages_and_images_open_untitled() {
+    let dir = tmp("pdf-untitled");
+    let pdf = pdf_file(&dir, "doc.pdf");
+    let mut s = Session::new();
+    for (params, name, size) in [
+        (json!({"path": pdf}), "doc-1.pdf", (208, 208)),
+        (json!({"path": pdf, "page": 2, "resolution": 72, "crop": "mediaBox"}), "doc-2.pdf", (100, 100)),
+        (json!({"path": pdf, "image": 1}), "doc-1", (2, 2)),
+    ] {
+        s.execute("file.openAs", params).unwrap();
+        let st = s.active().unwrap();
+        assert_eq!((st.doc.name.as_str(), st.doc.size.width, st.doc.size.height), (name, size.0, size.1));
+        assert!(st.path.is_none() && st.source_read_only, "{name}: Save must not write into the PDF");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PDF pages become editable documents; new layers survive PSD/native save without replacing
+/// the PDF. Exercise the open/edit/save workflow across both supported import depths.
+#[test]
+fn pdf_page_edits_save_as_layered_documents_without_overwriting_the_source() {
+    let dir = tmp("pdf-edit-save");
+    let source = pdf_file(&dir, "original.pdf");
+    let original = std::fs::read(&source).unwrap();
+    for depth in [8, 16] {
+        for ext in ["psd", "pcraft"] {
+            let mut s = Session::new();
+            s.execute("file.openAs", json!({"path": source, "page": 2, "resolution": 72, "crop": "mediaBox", "depth": depth})).unwrap();
+            assert!(s.active().unwrap().path.is_none());
+            let before = composite(&s, 65, 35);
+            s.execute("layer.new.layer", json!({"name": "PDF annotations"})).unwrap();
+            let output = join(&dir, &format!("edited-{depth}.{ext}"));
+            s.execute("file.saveACopy", json!({"path": output})).unwrap();
+            let reopened = photocraft_io::import(&output, &std::fs::read(&output).unwrap()).unwrap().document;
+            assert_eq!(reopened.layers.len(), 2, "{depth} {ext}");
+            assert!(reopened.layers.iter().any(|l| l.name == "PDF annotations"));
+            assert_eq!(reopened.size, doc(&s).size);
+            assert_eq!(reopened.depth, doc(&s).depth);
+            let pixel = photocraft_compose::render(&reopened, Rect::new(65, 35, 66, 36)).px[0];
+            for (actual, expected) in pixel.into_iter().zip(before) {
+                assert!((actual - expected).abs() < 0.01, "page appearance survives {ext}");
+            }
+            assert_eq!(std::fs::read(&source).unwrap(), original);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

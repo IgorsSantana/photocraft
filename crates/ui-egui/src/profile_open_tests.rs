@@ -33,7 +33,7 @@ fn harness(background: bool) -> Harness<'static, PhotocraftApp> {
         PhotocraftApp::new(
             Session::new(),
             Services {
-                import: Some(Box::new(|name, bytes, opts| {
+                import: Some(Box::new(|name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions| {
                     photocraft_io::import_with_options(name, bytes, opts).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
                 })),
                 ..Default::default()
@@ -171,7 +171,7 @@ fn the_prompt_is_translated_and_still_names_its_file() {
         ),
     ] {
         let services = Services {
-            import: Some(Box::new(|name, bytes, opts| {
+            import: Some(Box::new(|name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions| {
                 photocraft_io::import_with_options(name, bytes, opts).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
             })),
             ..Default::default()
