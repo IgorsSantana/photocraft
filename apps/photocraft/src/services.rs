@@ -105,6 +105,7 @@ const SAVE_FILTERS: &[(&str, &[&str])] = &[
     // Game and 3D textures; DDS Options asks for the compression and mipmaps (#1327).
     ("DDS", &["dds"]),
     ("Cineon", &["cin"]),
+    ("Amiga IFF", &["iff"]),
 ];
 
 /// Non-document files the shell saves (Swatches panel exports): offered alone, so the dialog
@@ -688,7 +689,12 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         clipboard_unreadable: Some(Box::new(move || clip_unreadable.get())),
         load_prefs: Some(Box::new(|| std::fs::read_to_string(prefs_file()?).ok())),
         photoshop_shortcuts: Some(Box::new(|| crate::photoshop_settings::live_keyboard_shortcuts(&|k| std::env::var_os(k)))),
-        save_prefs: Some(Box::new(|text: &str| write_atomic(&prefs_file().ok_or("no config directory")?, text.as_bytes()))),
+        save_prefs: Some(Box::new(|text: &str| {
+            write_atomic(&prefs_file().ok_or("no config directory")?, text.as_bytes())?;
+            #[cfg(target_os = "windows")]
+            crate::explorer_thumbnails::after_save(text);
+            Ok(())
+        })),
         system_theme: crate::appearance::service(),
         append_text: Some(Box::new(|path: &str, text: &str| {
             use std::io::Write;

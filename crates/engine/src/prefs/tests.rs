@@ -22,6 +22,21 @@ fn defaults_match_photoshop() {
     }
 }
 
+#[test]
+fn intermediate_ui_scale_presets_survive_restart() {
+    let mut s = Session::new();
+    assert_eq!(s.execute("prefs.get", json!({"path": "interface.uiScale"})).unwrap(), json!("auto"));
+    for scale in ["100", "105", "110", "115", "120", "125"] {
+        s.execute("prefs.set", json!({"path": "interface.uiScale", "value": scale})).unwrap();
+        let mut restored = Session::new();
+        restored.load_prefs_json(&s.prefs_to_json()).unwrap();
+        assert_eq!(restored.execute("prefs.get", json!({"path": "interface.uiScale"})).unwrap(), json!(scale));
+    }
+    // Presets remain discrete choices: arbitrary values must not silently replace a valid scale.
+    assert!(s.execute("prefs.set", json!({"path": "interface.uiScale", "value": "112"})).is_err());
+    assert_eq!(s.execute("prefs.get", json!({"path": "interface.uiScale"})).unwrap(), json!("125"));
+}
+
 /// #2264: the Studio workspace dot pattern can be hidden without changing themes.
 #[test]
 fn canvas_dot_grid_can_be_disabled_persisted_and_reset() {
@@ -587,6 +602,27 @@ fn linux_only_preferences_show_only_on_linux() {
     assert!(LINUX_ONLY.contains(&"performance.gpuAdapter"));
     let free_text = ["performance.gpuAdapter"];
     assert!(LINUX_ONLY.iter().all(|p| free_text.contains(p) || choices(p).is_some()), "every Linux-only preference is a real one");
+}
+
+#[test]
+fn explorer_thumbnails_is_a_windows_only_choice_defaulting_to_on_with_logo() {
+    assert_eq!(Preferences::default().file_handling.explorer_thumbnails, ExplorerThumbnails::WithLogo);
+    assert_eq!(is_hidden("fileHandling.explorerThumbnails"), !cfg!(target_os = "windows"));
+    assert_eq!(choices("fileHandling.explorerThumbnails"), Some(&["off", "withLogo", "noLogo"][..]));
+    let mut s = Session::new();
+    for (value, want) in [("off", ExplorerThumbnails::Off), ("noLogo", ExplorerThumbnails::NoLogo), ("withLogo", ExplorerThumbnails::WithLogo)] {
+        s.execute("prefs.set", json!({"path": "fileHandling.explorerThumbnails", "value": value})).unwrap();
+        assert_eq!(s.prefs().file_handling.explorer_thumbnails, want);
+    }
+    assert!(s.execute("prefs.set", json!({"path": "fileHandling.explorerThumbnails", "value": "sometimes"})).is_err());
+    assert_eq!(s.prefs().file_handling.explorer_thumbnails, ExplorerThumbnails::WithLogo);
+    // Older preference files without the setting keep it on.
+    let mut t = Session::new();
+    t.load_prefs_json(r#"{"fileHandling": {"autosave": false}}"#).unwrap();
+    assert_eq!(t.prefs().file_handling.explorer_thumbnails, ExplorerThumbnails::WithLogo);
+    for path in WINDOWS_ONLY {
+        assert!(s.execute("prefs.get", json!({"path": path})).is_ok(), "{path} is a real preference");
+    }
 }
 
 #[test]

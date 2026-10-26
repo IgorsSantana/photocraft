@@ -126,6 +126,8 @@ On Linux, on a machine with several GPUs (say an eGPU, a discrete laptop GPU and
 
 On DX12 the shader compiler is FXC (`d3dcompiler_47.dll`, part of Windows), or a `dxcompiler.dll` placed beside `photocraft.exe`, loaded by its full path. wgpu's default looks `dxcompiler.dll` up by name, which reaches the current directory and `PATH` and loaded other programs' incompatible builds (#712).
 
+On Windows, File Explorer shows a PSD/PSB's embedded preview (the 160 px image resource 1036 that Preferences › File Handling › Image Previews saves) as its thumbnail. That is `photocraft_shell.dll`, built from `crates/shell` (`cargo build --release -p photocraft-shell`) and shipped beside `photocraft.exe`: a COM `IThumbnailProvider` that reads only the start of the file with a small bounds-checked parser and decodes the JPEG with the GDI+ that ships with Windows. Preferences › File Handling › Explorer Thumbnails sets Off, On with logo (Windows' usual look, the default) or On without logo (hides the file-type badge). The app registers the DLL for the current user only (`HKCU\Software\Classes`, no elevation) at launch and when the preference changes, leaves `.psd` alone when another program such as Photoshop already provides its thumbnails until the user picks the preference explicitly, and does nothing in portable mode, with `PHOTOCRAFT_CONFIG_DIR`, or in a 32-bit build. `regsvr32 photocraft_shell.dll` and `regsvr32 /u` do the same by hand. Explorer caches thumbnails, so a file already shown may keep its old picture for a while. Code: `crates/shell`, `apps/photocraft/src/explorer_thumbnails.rs`.
+
 Handled windowing and app initialization errors clear this launch's startup marker, restoring any
 prior crash evidence. For example, a Linux launch without `DISPLAY` or `WAYLAND_DISPLAY` does not
 change the next launch's graphics backend. Renderer initialization errors and driver crashes still
@@ -143,15 +145,18 @@ By default PhotoCraft's own crates log at `info` and everything else at `warn`. 
 
 ## Environment variables
 
+`photocraft --help` lists the desktop app's flags and, beside the control, automation-root and in-window-menu flags, the variable that stands in for each. A flag wins over its variable and an empty variable counts as unset. A bad flag value is a usage error naming the flag (exit status 2), as is an unknown option, a repeated flag or a flag without its value; a bad value in one of those listed variables is a usage error naming the variable. `PHOTOCRAFT_PRESENT_MODE` and `PHOTOCRAFT_FRAME_LATENCY` are not listed: a bad value there is logged and ignored. On Windows, release builds use the GUI subsystem and have no console, so `--help`, `--version` and usage errors print nothing in a terminal; redirect them to see the text (`photocraft --help | more` or `photocraft --help > help.txt`). The exit status is the same either way.
+
 | Variable | Effect |
 |---|---|
-| `PHOTOCRAFT_CONTROL_PORT` | Same as `--control <port>` |
+| `PHOTOCRAFT_CONTROL_PORT` | Same as `--control <port>`; also the port for `photocraft-cli serve --port` and `mcp --bridge` when the flag is absent. Empty is unset |
 | `PHOTOCRAFT_NO_PRINT` | Set to anything but `0`: `file.print` / `file.printOneCopy` refuse to spool (`dryRun` still works). CI sets it, with `LPDEST=photocraft-no-such-printer` as a second net; set both when running the panic hunt or fuzzers locally |
 | `RUST_LOG` | Log levels for standard error and the log file (see [Logs](#logs)) |
 | `PHOTOCRAFT_CONTROL_TOKEN` | 64-hex bearer token for control TCP (avoid on shared systems where environment inspection is possible) |
 | `PHOTOCRAFT_CONTROL_TOKEN_FILE` | Read, or create for a server, the control bearer-token file |
-| `PHOTOCRAFT_AUTOMATION_READ_ROOT` | Desktop app only: automation read root. Headless CLI modes require the `--automation-read-root` flag |
-| `PHOTOCRAFT_AUTOMATION_WRITE_ROOT` | Desktop app only: automation write root. Headless CLI modes require the `--automation-write-root` flag |
+| `PHOTOCRAFT_AUTOMATION_READ_ROOT` | Desktop app only: automation read root (`--automation-read-root`). Headless CLI modes require the flag |
+| `PHOTOCRAFT_AUTOMATION_WRITE_ROOT` | Desktop app only: automation write root (`--automation-write-root`). Headless CLI modes require the flag |
+| `PHOTOCRAFT_IN_WINDOW_MENUS=1` (or `--in-window-menus`) | macOS: keep the menus inside the window instead of the menu bar. `0`, `false`, `no`, `off` or empty is off |
 | `PHOTOCRAFT_CPU_CANVAS=1` | Force the CPU canvas path instead of the wgpu shader canvas |
 | `PHOTOCRAFT_NATIVE_WAYLAND=1` | Linux: stay on native Wayland when a pen is attached (by default the window then opens through Xwayland, because Wayland gives the app no pen input; #639). A pen is an input device with `BTN_TOOL_PEN` and the `ABS_X`/`ABS_Y` axes; virtual keyboards that claim every key are not pens (#1072) |
 | `PHOTOCRAFT_GPU_ADAPTER=nvidia` | Linux: use the graphics adapter whose name contains this (case-insensitive); overrides `performance.gpuAdapter` for one launch |
@@ -164,8 +169,8 @@ By default PhotoCraft's own crates log at `info` and everything else at `warn`. 
 | `PHOTOCRAFT_LOCALE` | Override Auto's native UI language for this launch; unsupported tags use English. See [system language detection](localization.md#first-launch-and-system-language). |
 | `PHOTOCRAFT_FX_TRACE=1` | Print the CPU time spent on GPU effect shapes and distance fields per rebuild |
 | `PHOTOCRAFT_STROKE_TRACE=1` (or `=<file.csv>`; also `--stroke-trace <stderr|file.csv>`, or `ui.set {"strokeTrace": true|false}` at runtime, without a file) | Time every frame of each brush stroke; print a summary per stroke, and with a path also append each frame to that CSV (see [Stroke latency trace](#stroke-latency-trace)) |
-| `PHOTOCRAFT_PRESENT_MODE=novsync` (or `--present-mode`) | Present mode for this launch: `fifo`, `autovsync`, or `novsync` (also `immediate`, `mailbox`: no vsync, the first of Immediate, Mailbox, Fifo the driver offers). Default: vsync, or no vsync when Preferences › Performance › Low-Latency Drawing is on (it ships off). For latency comparisons; shown in the stroke trace |
-| `PHOTOCRAFT_FRAME_LATENCY=1` (or `--frame-latency`) | Frames the swap chain may queue, 1 to 3 (wgpu's GL backend ignores it). For latency comparisons; shown in the stroke trace |
+| `PHOTOCRAFT_PRESENT_MODE=novsync` (or `--present-mode`) | Present mode for this launch: `fifo`, `autovsync`, or `novsync` (also `immediate`, `mailbox`: no vsync, the first of Immediate, Mailbox, Fifo the driver offers). Default: vsync, or no vsync when Preferences › Performance › Low-Latency Drawing is on (it ships off). For latency comparisons; shown in the stroke trace. A bad `--present-mode` is a usage error; a bad variable is logged and ignored |
+| `PHOTOCRAFT_FRAME_LATENCY=1` (or `--frame-latency`) | Frames the swap chain may queue, 1 to 3 (wgpu's GL backend ignores it). For latency comparisons; shown in the stroke trace. A bad `--frame-latency` is a usage error; a bad variable is logged and ignored |
 | `PHOTOCRAFT_PRINT_PORTAL=1` | Linux: File › Print always opens the system print dialog (the XDG print portal) instead of talking to CUPS; `0` never does. See [printing](printing.md). |
 | `PHOTOCRAFT_THEME_FILE=tokens.json` | **Debug builds only:** live design-token overrides, re-read on change |
 
@@ -227,6 +232,7 @@ cargo run -p photocraft-cli -- run in.png --cmd layer.new.layer --params '{"name
 cargo run -p photocraft-cli -- run --new '{"width":800,"height":600}' --cmd document.inspect
 cargo run -p photocraft-cli -- batch --actions actions.json --in photos/ --out done/ --format jpg
 cargo run -p photocraft-cli -- commands --filter blur                    # the command registry
+cargo run -p photocraft-cli --example man-and-completions -- out/       # man pages + bash/zsh/fish/elvish/PowerShell completions
 ```
 
 `actions.json` holds the steps of a recorded action: `[["<id>", {…}], …]`, `[{"command": "<id>", "params": {…}}, …]` or bare ids, as a list or wrapped in `{"actions": …}` or `{"steps": …}`; a droplet file works too. It can also be an Actions set (the Actions panel's `actions.json`, `{"actions": [{"name": …, "steps": […]}, …]}`): `--action <name>` picks the action to play (optional when the set holds one), and the whole set is loaded for each file, so a step that plays another action of the set works. `batch` refuses an `--out` folder that is the `--in` folder, since the results would replace the originals, unless `--in-place` is given. `run` prints one JSON line per command result.
@@ -420,6 +426,8 @@ cargo xtask perf --update-baseline   # also write perf/baseline.json from this r
   `cargo xtask perf --update-baseline`, with the machine (CPU, RAM, GPU adapter, OS), its machine
   class, commit, date and load average.
 - `crates/io/tests/it/corpus.rs`: the corpus floors (every `Source { .. }` constant).
+- `xtask/*-corpus.sha256`: file counts for pinned corpora, so stale counts in doc comments cannot
+  change the reported denominators. No downloaded corpus is needed to generate the scorecard.
 - The prefs audit: `Preferences` fields that no code reads (target 0, #204), plus counts taken
   from the tree (never-crash attribute coverage, `docs/parity-checklist.md`).
 
@@ -605,7 +613,7 @@ against committed **sha256 manifests**. All pins are in one place:
 
 | Directory | What | Source | Manifest |
 |---|---|---|---|
-| `corpus/photoshop/` | 256 PSDs we authored with Photoshop: smart filters, layer-style effect shapes, the text engine, adjustments in every mode and depth | https://github.com/storytold/photocraft-corpus (ours, MIT OR Apache-2.0) | `xtask/photoshop-corpus.sha256` |
+| `corpus/photoshop/` | 258 PSDs we authored with Photoshop: smart filters, layer-style effect shapes, the text engine, adjustments in every mode and depth | https://github.com/storytold/photocraft-corpus (ours, MIT OR Apache-2.0) | `xtask/photoshop-corpus.sha256` |
 | `corpus/gimp/` | 14 XCF files written by GIMP 3.2.6 with GIMP's merged rendering of each as a PNG (28 files), the oracles of the XCF reader | https://github.com/storytold/photocraft-corpus (ours, MIT OR Apache-2.0; its own pin) | `xtask/gimp-corpus.sha256` |
 | `corpus/psd/` | 170 small psd-tools and ag-psd files, the mix most PSD tests use | psd-tools and ag-psd upstreams (MIT) | `xtask/psd-corpus.sha256` |
 | `corpus/psd-tools/` | the complete psd-tools test set (309 files) | psd-tools upstream (MIT) | `xtask/psd-tools-corpus.sha256` |
@@ -708,3 +716,12 @@ backend command without submitting; it writes a PDF only when `output` is explic
 without an output requires `dryRun: true`. Remembered print settings omit `output`, `dryRun` and
 `send`, so Print One Copy derives submission from its own output choice. Shared spooler transport
 files are automatically removed on Windows; CUPS needs none.
+
+
+### Extended document thumbnails
+
+The integration branch also registers `.psb` and `.pcraft`. Photoshop-compatible PSD/PSB resource 1036 is read irrespective of the application that saved it. Native `.pcraft` files use the existing 256 px `thumb.png`, emitted directly after `manifest.json` in a STORE ZIP. The provider bounds its prefix read to 16 MiB and the PNG to 4 MiB/2048 px per side, validates the ZIP payload CRC, and never decodes document layers. Repacked/deflated native bundles, oversized manifests and files without embedded previews fall back to the icon. PNG transparency is composited onto white by GDI+.
+
+Registration and saved previous handlers are separate for all three extensions. Automatic startup preserves other programs' handlers; an explicit preference change may replace them. Turning the feature off restores each previous per-user handler. Portable/custom-config runs do not register handlers. Re-save older files with Image Previews enabled and allow Explorer to refresh its thumbnail cache.
+
+The Windows shell implementation comes from [wer33321's PR #7805](https://github.com/storytold/photocraft/pull/7805), extended here with PSB coverage and native PhotoCraft previews. Its isolated COM/registry `unsafe` exception is proposed for maintainer review; it is not an already-approved upstream policy change. Real Windows Explorer and installer install/upgrade/uninstall testing remain required for this extended version.
