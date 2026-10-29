@@ -1,10 +1,10 @@
 # PDF import continuation — 2026-10-29 (America/Sao_Paulo)
 
-- state: em_andamento
+- state: bloqueado
 - ready_for_delivery: false
-- Reason: this checkpoint preserves the actual pending integration, replacing the earlier diagnostic-only checkpoint. Final native tests and mandatory checks are still pending. Do not create a PR or merge this checkpoint.
+- Reason: full upstream integration is preserved, but current native validation is blocked by dependency-download network failures (403 / proxy connection failure) and an incomplete local cache. Do not deliver or merge as validated.
 - Stable release: v0.17.0, verified as published and non-prerelease.
-- Base and last observed upstream main: 5f9b4391874aabc9deb2fcb905267613e4d93ec8. The complete upstream changes since the previous integration were applied with git apply --3way; no conflicts remain in the working tree. Final remote head is reported separately.
+- Original base: 5f9b4391874aabc9deb2fcb905267613e4d93ec8. Latest integrated upstream: c645d5fcc92c4bdd0d925084450699d05a184850 (63 additional commits). Full git merge, not selected patches. Two additive translation conflicts (de/it) resolved by preserving both sets of entries; no unresolved files. Final remote head is reported separately.
 - Checkpoint branch: automation/photocraft-2026-10-29.
 - Origin: feat/pdf-open / https://github.com/storytold/photocraft/pull/9117; remote PR head 3440cc08ff4a40cac067f4270bb5dee50a4823a3, open and unmerged when checked.
 - Preserved history: helper 71fa2b15d3f24d421789a22a6bc15ff440872631 by vangel76; original import contribution by Unemars (#6990). No contributor credits or licences were removed.
@@ -45,3 +45,15 @@ Resume from this checkpoint, finish focused tests and mandatory gates, fix any v
 Title: Fix PDF import integration and preserve selected smart-object pages
 
 Description: Continue Unemars's PDF import work and vangel76's integration, adapting it to current PhotoCraft modules and egui. Preserve the selected rasterised PDF page in embedded smart-object sources, mask and isolate PDF passwords, and reject overflowing CCITT dimensions. Pages remain raster images; editable PDF text/vector objects and PSD layers are not reconstructed. Linked PDF placement is explicitly unsupported. Final integrated validation is pending; this checkpoint is not ready for a draft PR.
+
+## Continuation on 2026-10-29
+
+- Downloaded the remote checkpoint and created an isolated worktree; left prior worktrees unchanged.
+- Stable release remains v0.17.0. Existing PR #9117 remains open/unmerged at 3440cc08ff4a40cac067f4270bb5dee50a4823a3; do not open a duplicate.
+- Integrated all 63 upstream commits through c645d5fcc92c4bdd0d925084450699d05a184850. Integration commit: b4509d58be996f4b781c5bfe3031971b2b41bc3e. Functional implementation remains the prior PDF contribution plus current upstream, with no additional feature.
+- git diff --cached --check: exit 0 before merge commit. cargo fmt --all --check: exit 0 against integration commit b4509d58be996f4b781c5bfe3031971b2b41bc3e.
+- Restored Rust 1.95.0 and system fontconfig/pkg-config prerequisites. No repository dependency versions changed.
+- Focused native command: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --config 'profile.test.opt-level=0' -p photocraft-engine -p photocraft-ui-egui -p photocraft-cli --lib pdf -- --test-threads=2, with CARGO_BUILD_JOBS=4, debug info disabled and RUST_MIN_STACK=33554432. Download encountered repeated HTTP CONNECT 403 / proxy connection failures; process continuation reported network approval cancelled. No test execution or terminal exit code was obtained from that online attempt.
+- Offline diagnostic: same command with --offline exited 101: missing accesskit v0.25.1 requires download. This is an environment/dependency-access blocker, not evidence of a source test failure or success.
+- No current successful functional test results. Clippy, native test suites, panic-hunt, wasm/layers, corpus and offscreen review remain unexecuted for this integrated commit. Historical results above are not substituted for them.
+- Next minimum step: restore dependency access, complete focused PDF tests, fix demonstrated failures, then run applicable repository gates and visual review. Only then set ready_for_delivery true and prepare the delivery branch without this handoff. No PR, upstream comment or main update was made.

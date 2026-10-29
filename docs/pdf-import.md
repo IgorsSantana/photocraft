@@ -8,7 +8,7 @@ Pages opened through the import dialog are untitled and require a new save desti
 
 ## Implementation and attribution
 
-This integration preserves the commits of [PR #6990](https://github.com/storytold/photocraft/pull/6990) by Unemars, using the pure-Rust hayro renderer. It combines that work with upstream `5f9b4391874aabc9deb2fcb905267613e4d93ec8`, retaining current RAW demosaic/resolution preferences, PSD recovery, CLI overwrite protection, and TIFF/JPEG export settings. PDF is included in the desktop and browser open-file filters. The added workflow regression verifies PDF page import, a new layer, and PSD/native save at both 8 and 16 bits.
+This integration preserves the commits of [PR #6990](https://github.com/storytold/photocraft/pull/6990) by Unemars, using the pure-Rust hayro renderer. It combines that work with upstream `c645d5fcc92c4bdd0d925084450699d05a184850`, retaining current RAW demosaic/resolution preferences, PSD recovery, CLI overwrite protection, and TIFF/JPEG export settings. PDF is included in the desktop and browser open-file filters. The added workflow regression verifies PDF page import, a new layer, and PSD/native save at both 8 and 16 bits.
 
 Place Embedded stores the selected rasterised page as a native smart-object source, preserving the selection when its cache is rebuilt or the document is reopened. Place Linked rejects PDF sources until linked page-selection metadata is supported. Password input is masked and kept outside inspectable dialog fields; automation may set `password` but cannot read it back.
 
