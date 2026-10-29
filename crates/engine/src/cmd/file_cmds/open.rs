@@ -3,6 +3,7 @@ use super::{
     Affine, Arc, Document, EngineError, Layer, LayerContent, Resample, Result, Session, SmartObject, SmartSource, Value, f64_param, flattened_checked, json,
     resize_surface, str_param, translate_surface,
 };
+use photocraft_color::ColorMode;
 
 pub(crate) fn import(name: &str, bytes: &[u8]) -> Result<Document> {
     import_result(name, bytes).map(|r| r.document)
@@ -109,12 +110,81 @@ fn raw_resolution(ppi: f64, warnings: &[String], doc: &mut Document) {
 }
 
 pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&str>, path: Option<String>) -> Result<Value> {
+    let opts = crate::jobs::import_options(s.prefs());
+    open_bytes_with(s, name, bytes, as_ext, path, &opts)
+}
+
+/// The Import PDF answers in a command's params (`page`, `resolution`, `crop`, `mode`, `depth`,
+/// `antiAlias`, `name`, `password`, `image`, `suppressWarnings`), or `None` when it names none:
+/// a PDF then opens with Photoshop's defaults (page 1, Bounding Box, 300 ppi, RGB, 8 bits).
+pub fn pdf_options(p: &Value) -> Result<Option<photocraft_io::pdf_import::PdfOpenOptions>> {
+    use photocraft_io::pdf_import::{CropTo, PdfOpenOptions};
+    let keys = ["page", "resolution", "crop", "mode", "depth", "antiAlias", "name", "password", "image", "suppressWarnings"];
+    if !keys.iter().any(|k| p.get(k).is_some()) {
+        return Ok(None);
+    }
+    let mut o = PdfOpenOptions::default();
+    if let Some(v) = p.get("page") {
+        o.page = v.as_u64().and_then(|n| usize::try_from(n).ok()).filter(|n| *n >= 1).ok_or_else(|| EngineError::Other("page: a page number from 1".into()))?;
+    }
+    if let Some(v) = p.get("image") {
+        o.image = Some(
+            v.as_u64().and_then(|n| usize::try_from(n).ok()).filter(|n| *n >= 1).ok_or_else(|| EngineError::Other("image: an image number from 1".into()))?,
+        );
+    }
+    if let Some(v) = p.get("resolution") {
+        let r = v
+            .as_f64()
+            .filter(|r| r.is_finite() && *r > 0.0 && (*r as f32).is_finite())
+            .ok_or_else(|| EngineError::Other("resolution: pixels per inch".into()))?;
+        o.resolution = r as f32;
+    }
+    if let Some(v) = p.get("crop") {
+        let c = v.as_str().and_then(CropTo::from_id).ok_or_else(|| EngineError::Other("crop: boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox".into()))?;
+        o.crop = c;
+    }
+    if let Some(v) = p.get("mode") {
+        o.mode = match v.as_str().map(str::to_ascii_lowercase).as_deref() {
+            Some("rgb") => ColorMode::Rgb,
+            Some("gray" | "grayscale") => ColorMode::Grayscale,
+            Some("cmyk") => ColorMode::Cmyk,
+            Some("lab") => ColorMode::Lab,
+            _ => return Err(EngineError::Other("mode: rgb|gray|cmyk|lab".into())),
+        };
+    }
+    if let Some(v) = p.get("depth") {
+        o.depth = match v.as_u64() {
+            Some(8) => photocraft_color::SampleType::U8,
+            Some(16) => photocraft_color::SampleType::U16,
+            _ => return Err(EngineError::Other("depth: 8|16".into())),
+        };
+    }
+    if let Some(v) = p.get("antiAlias") {
+        o.anti_alias = v.as_bool().ok_or_else(|| EngineError::Other("antiAlias: true|false".into()))?;
+    }
+    if let Some(v) = p.get("suppressWarnings") {
+        o.suppress_warnings = v.as_bool().ok_or_else(|| EngineError::Other("suppressWarnings: true|false".into()))?;
+    }
+    o.name = p.get("name").and_then(Value::as_str).map(str::to_string);
+    o.password = p.get("password").and_then(Value::as_str).map(str::to_string);
+    Ok(Some(o))
+}
+
+/// [`open_bytes_as`] with explicit import settings.
+pub fn open_bytes_with(
+    s: &mut Session,
+    name: &str,
+    bytes: &[u8],
+    as_ext: Option<&str>,
+    path: Option<String>,
+    opts: &photocraft_io::ImportOptions,
+) -> Result<Value> {
     crate::allocation::checkpoint("importing document")?;
     let decode_name = match as_ext {
         Some(ext) => format!("{}.{}", stem(name), ext.trim_start_matches('.')),
         None => name.to_string(),
     };
-    let r = photocraft_io::import(&decode_name, bytes).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
+    let r = photocraft_io::import_with_options(&decode_name, bytes, opts).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
     let mut doc = r.document;
     tag_exr_colorspace(s, &decode_name, &mut doc);
     raw_defaults(s, &r.warnings, &mut doc);
@@ -124,7 +194,10 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
             None
         }
         None => {
-            doc.name = file_name(name);
+            // A PDF page is named by its import (`multi-2.pdf`): the file name would hide it.
+            if !photocraft_io::is_pdf_input(&decode_name, bytes) {
+                doc.name = file_name(name);
+            }
             path
         }
     };
@@ -141,7 +214,9 @@ pub(super) fn open_as(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_param(p, "path", "file.openAs")?.to_string();
     let bytes = read_file(&path)?;
     let as_ext = p.get("as").or_else(|| p.get("format")).and_then(Value::as_str);
-    open_bytes_as(s, &path, &bytes, as_ext, Some(path.clone()))
+    let mut opts = crate::jobs::import_options(s.prefs());
+    opts.pdf = pdf_options(p)?;
+    open_bytes_with(s, &path, &bytes, as_ext, Some(path.clone()), &opts)
 }
 
 // ---------- place ----------
@@ -159,7 +234,12 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
     let (cw, ch) = (d.doc.size.width as f64, d.doc.size.height as f64);
     let fmt = d.doc.pixel_format();
     let vector = photocraft_io::svg::is_svg(&bytes);
-    let opts = crate::jobs::import_options(s.prefs());
+    let pdf = photocraft_io::is_pdf_input(name, &bytes);
+    let mut opts = crate::jobs::import_options(s.prefs());
+    opts.pdf = pdf_options(p)?;
+    if pdf && linked.is_some() {
+        return Err(EngineError::Other("Linked PDF placement is not supported; use Place Embedded to preserve the selected page.".into()));
+    }
     let imported = photocraft_io::import_with_options(name, &bytes, &opts).map_err(|e| EngineError::Other(format!("{name}: {e}")))?;
     if imported.preview_only {
         return Err(EngineError::Other(format!(
@@ -188,9 +268,16 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
     // Preferences ▸ General ▸ Always Create Smart Objects When Placing (on by default): off, an
     // embedded place lands as a plain pixel layer. A linked place is always a smart object.
     let smart = linked.is_some() || p.get("smartObject").and_then(Value::as_bool).unwrap_or(s.prefs().general.always_create_smart_objects_when_placing);
-    let source = match linked {
-        Some(path) => SmartSource::Linked { path },
-        None => SmartSource::Embedded { file_name: file_name(name), bytes: Arc::new(bytes) },
+    let source = if pdf && smart {
+        // Keep the chosen page, crop, depth and profile when the smart cache is rebuilt.
+        // Store native pixels instead of retaining the PDF or its password.
+        let bytes = photocraft_format::save_to_bytes(&src, &Default::default()).map_err(|e| EngineError::Other(e.to_string()))?;
+        SmartSource::Embedded { file_name: format!("{}.pcraft", stem(name)), bytes: Arc::new(bytes) }
+    } else {
+        match linked {
+            Some(path) => SmartSource::Linked { path },
+            None => SmartSource::Embedded { file_name: file_name(name), bytes: Arc::new(bytes) },
+        }
     };
     let layer_name = stem(name);
     let label = if matches!(&source, SmartSource::Linked { .. }) { "Place Linked" } else { PLACE_EMBEDDED };

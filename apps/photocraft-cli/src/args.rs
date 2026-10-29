@@ -82,6 +82,8 @@ pub(crate) struct ExportArgs {
 /// --in-place allows it.
 #[derive(Args)]
 pub(crate) struct ConvertArgs {
+    #[command(flatten)]
+    pub(crate) pdf: PdfArgs,
     /// The file to read
     #[arg(value_name = "IN")]
     pub(crate) input: PathBuf,
@@ -98,6 +100,8 @@ pub(crate) struct ConvertArgs {
 /// Print the document as JSON (size, mode, depth, layer tree)
 #[derive(Args)]
 pub(crate) struct InfoArgs {
+    #[command(flatten)]
+    pub(crate) pdf: PdfArgs,
     pub(crate) file: PathBuf,
     /// One line of JSON instead of pretty-printed
     #[arg(long)]
@@ -425,4 +429,81 @@ fn check_server(sub: &mut clap::Command, m: &ArgMatches, has_transport: bool, tr
         }
     }
     Ok(())
+}
+
+/// Import settings for a PDF page or embedded image; other formats ignore them.
+#[derive(Args, Default)]
+pub(crate) struct PdfArgs {
+    /// PDF page number (starting at 1)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) page: Option<u64>,
+    /// Embedded PDF image number instead of a page (starting at 1)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) image: Option<u64>,
+    /// PDF rendering resolution in pixels per inch
+    #[arg(long)]
+    pub(crate) resolution: Option<f64>,
+    /// PDF page crop box
+    #[arg(long, value_parser = ["boundingBox", "mediaBox", "cropBox", "bleedBox", "trimBox", "artBox"])]
+    pub(crate) crop: Option<String>,
+    /// PDF output colour mode
+    #[arg(long, value_parser = ["rgb", "gray", "cmyk", "lab"])]
+    pub(crate) mode: Option<String>,
+    /// PDF output bit depth
+    #[arg(long, value_parser = ["8", "16"])]
+    pub(crate) depth: Option<String>,
+    /// Disable PDF page anti-aliasing
+    #[arg(long)]
+    pub(crate) no_antialias: bool,
+}
+impl PdfArgs {
+    pub(crate) fn options(&self) -> crate::Result<photocraft_io::ImportOptions> {
+        let mut p = serde_json::Map::new();
+        for (key, value) in [("page", self.page), ("image", self.image)] {
+            if let Some(value) = value {
+                p.insert(key.into(), serde_json::json!(value));
+            }
+        }
+        if let Some(value) = self.resolution {
+            p.insert("resolution".into(), serde_json::json!(value));
+        }
+        if let Some(value) = &self.crop {
+            p.insert("crop".into(), serde_json::json!(value));
+        }
+        if let Some(value) = &self.mode {
+            p.insert("mode".into(), serde_json::json!(value));
+        }
+        if let Some(value) = &self.depth {
+            p.insert("depth".into(), serde_json::json!(if value == "16" { 16 } else { 8 }));
+        }
+        if self.no_antialias {
+            p.insert("antiAlias".into(), serde_json::json!(false));
+        }
+        Ok(photocraft_io::ImportOptions { pdf: photocraft_engine::file_cmds::pdf_options(&Value::Object(p))?, ..Default::default() })
+    }
+}
+
+#[cfg(test)]
+mod pdf_tests {
+    use super::*;
+
+    #[test]
+    fn pdf_import_flags_are_parsed_and_validated() {
+        let argv: Vec<std::ffi::OsString> = ["info", "pages.pdf", "--page", "2", "--resolution", "72", "--crop", "mediaBox", "--depth", "16", "--no-antialias"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let cli = parse(&argv).unwrap();
+        let Command::Info(info) = cli.command else { panic!("info") };
+        let options = info.pdf.options().unwrap().pdf.unwrap();
+        assert_eq!(options.page, 2);
+        assert_eq!(options.resolution, 72.0);
+        assert!(!options.anti_alias);
+        for bad in ["0", "-1", "two"] {
+            let argv = ["info", "pages.pdf", "--page", bad].map(Into::into);
+            assert!(parse(&argv).is_err());
+        }
+        let invalid = PdfArgs { resolution: Some(f64::INFINITY), ..Default::default() };
+        assert!(invalid.options().is_err());
+    }
 }

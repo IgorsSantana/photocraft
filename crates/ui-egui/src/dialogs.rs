@@ -333,6 +333,8 @@ fn command_body_more(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fie
 fn dialog_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: &mut Fields, id: egui::Id, interactive: bool) -> Option<bool> {
     let mut outcome: Option<bool> = None;
     match d.kind {
+        DialogKind::Command if crate::pdf_import_ui::owns(fields) => crate::pdf_import_ui::body(app, ui, d.id, fields),
+
         DialogKind::NewDocument => {
             if crate::new_doc_ui::body(app, ui, fields) {
                 outcome = Some(true);
@@ -802,6 +804,7 @@ type Fields = serde_json::Map<String, Value>;
 /// The markers [`confirm`] and [`cancel`] choose a dialog's handler by: keys the code opening a
 /// dialog puts in its fields. Keep in step with the arms of `confirm`.
 const ROUTES: &[fn(&Fields) -> bool] = &[
+    crate::pdf_import_ui::owns,
     crate::guide_layout_ui::owns,
     crate::brush_preset_dialog::owns,
     crate::fill_ui::owns,
@@ -953,6 +956,9 @@ fn confirm_preflight(app: &mut PhotocraftApp, id: u64) -> Result<(), String> {
 /// Confirm a command dialog through the first handler whose marker its fields carry; the prompts
 /// and small editors are here, the rest in `confirm_command_more`.
 fn confirm_command(app: &mut PhotocraftApp, d: Dialog) -> Result<Value, String> {
+    if crate::pdf_import_ui::owns(&d.fields) {
+        return crate::pdf_import_ui::confirm(app, d.id, &d.fields);
+    }
     match d.kind {
         _ if crate::open_prompt::owns_damage(&d.fields) => crate::open_prompt::answer_damage(app, true),
         _ if crate::guide_layout_ui::owns(&d.fields) => crate::guide_layout_ui::confirm(app, &d.fields),
@@ -1018,6 +1024,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
 
 /// Cancel a dialog and its dependent Layer Style picker, without applying edits.
 pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
+    crate::pdf_import_ui::forget(app, id);
     let closed = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
     crate::actions::stopped(app, &closed.fields);
     if crate::guide_layout_ui::owns(&closed.fields) {

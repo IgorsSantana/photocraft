@@ -333,8 +333,8 @@ what an agent can't finish alone.
 ## File-format gaps
 
 ### G10. Missing and partial file formats
-- **Missing:** JPEG Options' Matte, progressive Scans and size preview (FILE-215-19 partial), Photoshop PDF read and its vector/text/multi-page
-  write (FILE-215-10, #2541; a single flattened page now saves via Save As / Save a Copy / CLI,
+- **Missing:** JPEG Options' Matte, progressive Scans and size preview (FILE-215-19 partial), Photoshop PDF vector/text/multi-page
+  write (FILE-215-10; PDF read integrated from #6990; a single flattened page now saves via Save As / Save a Copy / CLI,
   2026-10-11, #3401), AVIF read (#463) and default-build AVIF write, JPEG XL, JPEG 2000 (#1047),
   DICOM, EPS/DCS, Pixar, WBMP, MPO/JPS, PICT, Scitex CT, Photoshop
   Raw; spot plates beyond PSD and TIFF: spot ink preview in RGB/CMYK documents and PDF Separation
@@ -484,6 +484,7 @@ what an agent can't finish alone.
 | 2026-10-11 | minor | G8: triple/quadruple/five-click type selection done (TYPE-218-8, #3493); Type evidence recounted |
 | 2026-10-11 | minor | G4: Pattern Stamp and Background Eraser draw live, Spot Healing shows a dark overlay while dragging (#3754); only the Mixer Brush is left of TOOL-213-7 |
 | 2026-10-11 | minor | G8: Character panel OpenType buttons landed (TYPE-218-5, #3752); Numerals and Stylistic Sets submenus still missing |
+| 2026-10-17 | minor | G10: PDF read shipped (io::pdf_import, Import PDF dialog as Photoshop's, #2541); FILE-215-10 still partial for the write side |
 | 2026-10-11 | minor | G10: one-page flattened PDF write shipped (io::pdf, #3401); FILE-215-10 now partial |
 | 2026-10-10 | minor | G2: recorded Tilt-Shift computation/filtered-proxy measurements and limits; gap and estimate remain open
 | 2026-10-10 | minor | Checked against the alpha gate (no alpha blockers); #2374 marked closed |

@@ -30,7 +30,7 @@ pub(crate) fn convert(a: &ConvertArgs, _out: &mut dyn Write, err: &mut dyn Write
     let (input, output) = (&a.input, &a.output);
     let opts = ExportOptions::from(&a.export);
     refuse_overwriting_input(a.in_place, input, output)?;
-    let mut o = files::open(input)?;
+    let mut o = files::open_with(input, &a.pdf.options()?)?;
     // Preferences › Raw Defaults › Resolution at its default, as `run` and `info` open a raw.
     photocraft_engine::file_cmds::raw_defaults(&photocraft_engine::Session::new(), &o.warnings, &mut o.document);
     warn_all(err, &o.warnings);
@@ -43,7 +43,7 @@ pub(crate) fn convert(a: &ConvertArgs, _out: &mut dyn Write, err: &mut dyn Write
 pub(crate) fn info(a: &InfoArgs, out: &mut dyn Write) -> Result {
     let file = &a.file;
     let mut h = Headless::trusted_local();
-    let opened = h.open(file)?;
+    let opened = h.open_with(file, &a.pdf.options()?)?;
     let mut doc = h.inspect(None)?;
     let mut warnings = opened["warnings"].as_array().cloned().unwrap_or_default();
     if let Some(st) = h.session.active() {

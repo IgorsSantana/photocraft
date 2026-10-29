@@ -60,6 +60,7 @@ pub use ora::losses as ora_losses;
 pub mod pattern_map;
 mod pcraft_cache;
 pub mod pdf;
+pub mod pdf_import;
 mod pdn;
 pub use pcraft_cache::PcraftExportCache;
 pub mod pixels;
@@ -126,6 +127,9 @@ pub enum IoError {
     /// An SVG that does not parse (or is too large to rasterise).
     #[error("SVG: {0}")]
     Svg(String),
+    /// A PDF that can't be read or rasterised (see [`pdf_import`]).
+    #[error("PDF: {0}")]
+    Pdf(String),
     /// The file could not be read.
     #[error("{0}")]
     Read(String),
@@ -302,7 +306,7 @@ fn is_psd_input(name: &str, bytes: &[u8]) -> bool {
     is_psd(bytes) || (PSD_EXTS.iter().any(|e| has_extension(name, e)) && photocraft_codecs::detect(bytes).is_none())
 }
 
-/// Imports a file. PSD/PSB, Affinity containers and camera raws are detected by magic; everything
+/// Imports a file. PSD/PSB, Affinity containers, PDFs and camera raws are detected by magic; everything
 /// else is decoded with `photocraft-codecs`.
 pub fn import(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
     import_with_svg_group_depth(name, bytes, photocraft_doc::MAX_GROUP_DEPTH)
@@ -331,17 +335,20 @@ pub fn import_with_svg_group_depth_and_interrupt(
 }
 
 /// The user's settings that shape an import.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ImportOptions {
     /// SVG groups nested deeper than this are rasterised.
     pub max_group_depth: usize,
+    /// How a PDF page opens (the Import PDF dialog's answers); Photoshop's defaults when `None`:
+    /// page 1, Bounding Box, 300 ppi, RGB, 8 bits, anti-aliased.
+    pub pdf: Option<pdf_import::PdfOpenOptions>,
     /// The demosaic method camera raws are developed with.
     pub demosaic: raw::Demosaic,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
-        ImportOptions { max_group_depth: photocraft_doc::MAX_GROUP_DEPTH, demosaic: raw::Demosaic::default() }
+        ImportOptions { max_group_depth: photocraft_doc::MAX_GROUP_DEPTH, demosaic: raw::Demosaic::default(), pdf: None }
     }
 }
 
@@ -491,6 +498,15 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
     if raw::is_raw(bytes) {
         return raw::import_raw_demosaic(name, bytes, opts.demosaic);
     }
+    // A PDF opens through the Import PDF options (a plain `import` takes Photoshop's defaults).
+    if is_pdf_input(name, bytes) {
+        let Some(chosen) = opts.pdf.as_ref() else { return pdf_import::import_pdf(name, bytes, &pdf_import::PdfOpenOptions::default(), ctl) };
+        // What Import PDF answers open (a page, an embedded image) is untitled, as in Photoshop:
+        // only a one-image PDF opened directly, like a picture, takes the PDF as its file.
+        let mut r = pdf_import::import_pdf(name, bytes, chosen, ctl)?;
+        r.source_read_only = true;
+        return Ok(r);
+    }
     if is_svg_input(name, bytes) {
         return svg::import_svg_with_group_depth(name, bytes, opts.max_group_depth);
     }
@@ -500,6 +516,14 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
         return import_psd(name, ctl, damaged, |want, recover| PsdFile::from_bytes_and_merged_recovering(bytes, want, recover));
     }
     flat::import_flat(name, bytes)
+}
+
+/// Whether `name`'s `bytes` open as a PDF: a file that starts with `%PDF-`, or one with the marker
+/// later in its first kilobyte (after a byte-order mark or a shell line, as the specification
+/// allows) that the SVG and raster importers don't take (an SVG may mention `%PDF-1.4` in a
+/// comment near its start).
+pub fn is_pdf_input(name: &str, bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-") || (pdf_import::is_pdf(bytes) && !is_svg_input(name, bytes) && photocraft_codecs::detect(bytes).is_none())
 }
 
 /// Extension names can be wrong (for example, an image downloaded as WebP and renamed `.svg`).

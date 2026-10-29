@@ -882,3 +882,8 @@ fn a_panicking_clipboard_read_is_reported_not_a_crash() {
     let mut set = guarded_clipboard_set(|_: u32, _: u32, _: &[u8]| panic!("clipboard writer bug"));
     assert!(set(1, 1, &[0; 4]).unwrap_err().contains("Copy failed"));
 }
+
+#[test]
+fn open_picker_includes_pdf() {
+    assert!(super::OPEN_EXTS.contains(&"pdf"));
+}

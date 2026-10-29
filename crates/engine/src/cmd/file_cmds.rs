@@ -39,7 +39,7 @@ use info::file_info;
 pub use info::{CAMERA_FIELDS, camera_data, read_file_info, write_file_info};
 #[cfg(test)]
 use info::{exposure_text, find_element};
-pub use open::{PLACE_EMBEDDED, open_bytes_as, place_bytes, raw_defaults};
+pub use open::{PLACE_EMBEDDED, open_bytes_as, open_bytes_with, pdf_options, place_bytes, raw_defaults};
 use open::{close_all, close_others, open_as, place, revert};
 pub(crate) use open::{import, tag_exr_colorspace};
 use paths::is_file;
@@ -250,7 +250,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Open As…",
             &["File"],
             Some("Cmd+Alt+Shift+O"),
-            r##"{"path":str,"as":"psd|png|jpg|tiff|…"? (decode as this format)}"##,
+            r##"{"path":str,"as":"psd|png|jpg|tiff|…"? (decode as this format),"page":int? (PDF: the page, from 1),"resolution":ppi? (PDF: 300 by default),"crop":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"? (PDF),"mode":"rgb|gray|cmyk|lab"? (PDF),"depth":8|16? (PDF),"antiAlias":bool? (PDF),"name":str? (PDF: the document name's stem),"image":int? (PDF: open embedded image N instead of a page),"password":str? (PDF),"suppressWarnings":bool? (PDF)}"##,
             native,
             open_as
         ),
@@ -259,7 +259,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place Embedded…",
             &["File"],
             None,
-            r##"{"path":str,"scale":%? (default: fit when larger than the canvas),"fit":bool? (default: Preferences > General > Resize Image During Place),"smartObject":bool? (default: Preferences > General > Always Create Smart Objects When Placing),"center":[x,y]?}"##,
+            r##"{"path":str,"scale":%? (default: fit when larger than the canvas),"fit":bool? (default: Preferences > General > Resize Image During Place),"smartObject":bool? (default: Preferences > General > Always Create Smart Objects When Placing),"center":[x,y]?,"page":int? (PDF: the page, from 1),"resolution":ppi? (PDF: 300 by default),"crop":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"? (PDF),"mode":"rgb|gray|cmyk|lab"? (PDF),"depth":8|16? (PDF),"antiAlias":bool? (PDF),"image":int? (PDF: place embedded image N instead of a page),"password":str? (PDF),"suppressWarnings":bool? (PDF)}"##,
             native_doc,
             |s, p| place(s, p, false)
         ),
@@ -268,7 +268,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place Linked…",
             &["File"],
             None,
-            r##"{"path":str,"scale":%?,"fit":bool? (default: Preferences > General > Resize Image During Place),"center":[x,y]?}"##,
+            r##"{"path":str,"scale":%?,"fit":bool?,"center":[x,y]?} (PDF sources are unsupported; use file.placeEmbedded)"##,
             native_doc,
             |s, p| place(s, p, true)
         ),

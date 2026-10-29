@@ -961,6 +961,17 @@ fn discard_dialog_confirm(app: &mut PhotocraftApp, ctx: &egui::Context, choice: 
 fn dialog_set(app: &mut PhotocraftApp, p: &Value) -> Outcome {
     let (Some(id), Some(field)) = (u64_param(p, "dialog"), str_param(p, "field")) else { return err("need `dialog` and `field`") };
     let value = p.get("value").cloned().unwrap_or(Value::Null);
+    if app.ui.dialogs.iter().any(|d| d.id == id && crate::pdf_import_ui::owns(&d.fields)) {
+        if field == "password" {
+            return match crate::pdf_import_ui::set_password(app, id, &value) {
+                Ok(()) => ok(Value::Null),
+                Err(e) => err(e),
+            };
+        }
+        if field.starts_with("__pdf") || field == "__needsPassword" {
+            return err("PDF dialog identity is read-only");
+        }
+    }
     match app.ui.dialog_mut(id) {
         // A continuation belongs to the dialog that paused it, even when another
         // action has a valid token. Replacing it would resume or cancel that action.

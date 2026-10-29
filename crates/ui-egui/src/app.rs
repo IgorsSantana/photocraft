@@ -115,6 +115,7 @@ impl PhotocraftApp {
             redraws: Default::default(),
             kept: Default::default(),
             color_range: None,
+            pdf_import: Vec::new(),
             adjust_preview: None,
             live_adjust_preview: None,
             synthetic: Vec::new(),

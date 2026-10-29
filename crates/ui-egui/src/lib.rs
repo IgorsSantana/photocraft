@@ -32,6 +32,7 @@ pub mod menus;
 pub mod monitor_status;
 pub mod notices;
 pub mod panels;
+pub mod pdf_import_ui;
 pub mod preset_files_ui;
 pub mod proxy;
 pub mod render_path;
@@ -308,6 +309,7 @@ pub use widgets::tone;
 type InfoSampleKey = (i32, i32, u64, u32);
 
 pub struct PhotocraftApp {
+    pub(crate) pdf_import: Vec<pdf_import_ui::PdfImport>,
     pub session: Session,
     pub ui: UiState,
     pub services: Services,

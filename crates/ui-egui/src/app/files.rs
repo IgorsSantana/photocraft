@@ -2,6 +2,7 @@ use super::{
     DocId, ExportSettings, FormatChoices, PhotocraftApp, SAVE_OPTIONS_OPEN, SaveKind, Value, camera_raw_ui, dds_options_ui, file_open, jobs_ui,
     jpeg_options_ui, json, notices, open_prompt, plain_raster, preset_files_ui, saved_revision_after_write, targa_options_ui, tiff_options_ui,
 };
+use crate::pdf_import_ui;
 
 impl PhotocraftApp {
     /// Record `path` as the most-recently-opened file (File › Open Recent): de-duplicated, newest
@@ -61,15 +62,24 @@ impl PhotocraftApp {
         if let Some(r) = preset_files_ui::open(self, name, bytes) {
             return r.map(|()| Vec::new());
         }
+        // A PDF asks how to open first (Import PDF), as Photoshop does.
+        if pdf_import_ui::wants_dialog(name, bytes) {
+            return pdf_import_ui::open(self, name, path, bytes).map(|_| Vec::new());
+        }
+        let opts = photocraft_engine::jobs::import_options(self.session.prefs());
+        self.open_bytes_with(name, bytes, path, opts)
+    }
+
+    /// [`Self::open_bytes_from`] with explicit import settings (a PDF page's Import PDF answers).
+    pub(crate) fn open_bytes_with(&mut self, name: &str, bytes: &[u8], path: Option<&str>, opts: photocraft_io::ImportOptions) -> Result<Vec<String>, String> {
         let name = &self.open_name(name);
         // Decoded on a worker: a tab with progress appears now, the document when it's ready
         // (warnings are shown then).
         if self.background_jobs {
-            jobs_ui::start_open(self, name, path.map(str::to_string), jobs_ui::bytes(bytes))?;
+            jobs_ui::start_open_with(self, name, path.map(str::to_string), jobs_ui::bytes(bytes), opts)?;
             return Ok(Vec::new());
         }
         let import = self.services.import.as_ref().ok_or("no importer configured")?;
-        let opts = photocraft_engine::jobs::import_options(self.session.prefs());
         let (mut doc, warnings, damaged) = if photocraft_io::is_psd(bytes) {
             // Read PSD damage as structured information in the same decode, not by
             // retrying an error or matching the text of a compatibility warning.
@@ -81,6 +91,7 @@ impl PhotocraftApp {
         };
         // Preferences › Raw Defaults › Resolution, as the engine's open applies it.
         photocraft_engine::file_cmds::raw_defaults(&self.session, &warnings, &mut doc);
+        let pdf_page = pdf_untitled(name, bytes, &opts);
         // Edit › Color Settings policies apply on open; Ask When Opening holds the file back
         // until its prompt is answered, and later files wait behind it (`open_prompt`).
         // Missing fonts are read from the document itself: it may not be open yet (#4559).
@@ -93,7 +104,7 @@ impl PhotocraftApp {
             self,
             open_prompt::Held {
                 doc,
-                read_only: photocraft_io::affinity::is_affinity(bytes),
+                read_only: photocraft_io::affinity::is_affinity(bytes) || pdf_page,
                 damage_pending: damaged,
                 name: name.to_string(),
                 path: path.map(str::to_string),
@@ -136,7 +147,7 @@ impl PhotocraftApp {
         // The caller records the path it read from.
         self.session.add_document(doc, None);
         if let Some(st) = self.session.active_mut() {
-            st.source_read_only = photocraft_io::affinity::is_affinity(bytes);
+            st.source_read_only = photocraft_io::affinity::is_affinity(bytes) || pdf_untitled(name, bytes, &opts);
         }
         self.sync_views();
         self.ui.status = crate::i18n::fmt(tl!("Opened {name}"), &[("name", name)]);
@@ -678,4 +689,8 @@ impl PhotocraftApp {
         }
         f
     }
+}
+
+fn pdf_untitled(name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions) -> bool {
+    photocraft_io::is_pdf_input(name, bytes) && (opts.pdf.is_some() || !photocraft_io::pdf_import::opens_as_image(bytes, None))
 }
