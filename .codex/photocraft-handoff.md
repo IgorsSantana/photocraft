@@ -27,9 +27,12 @@ This continuation:
 - git apply --3way of the complete upstream interval: exit 0, no unresolved files.
 - git diff --check: exit 0.
 - Rust toolchain restored to 1.95.0 after the environment lost it; no repository dependency changes were requested.
-- cargo fmt --all, followed by cargo fmt --all --check: executed; final result recorded in the continuation response.
+- cargo fmt --all, followed by cargo fmt --all --check: both exit 0; the check produced no formatting diff.
 - Focused command started: CARGO_TARGET_DIR=/tmp/pdf-continue-target CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUST_MIN_STACK=33554432 cargo test --config 'profile.dev.package."*".opt-level=0' --config 'profile.test.opt-level=0' -p photocraft-engine -p photocraft-ui-egui -p photocraft-cli --lib pdf -- --test-threads=2. A completed successful result has not yet been established for this checkpoint.
-- Validated implementation commit: none yet. Do not infer validation from compilation progress.
+- Implementation checkpoint: 4654927c777f71fc6c1e24670870bdf679d9b200. Its code is preserved, but it is not a successfully tested implementation commit. Do not infer validation from dependency-download or compilation progress.
+- GitHub tree for that implementation: f3d425bc28a3b9cb0c70fccf6957c64cdf1076d0, identical to local git write-tree.
+- Pre-publication upstream recheck: still 5f9b4391874aabc9deb2fcb905267613e4d93ec8.
+- Focused Rust test command had not completed beyond dependency preparation when this handoff was saved; no successful current test result is claimed.
 
 Historical evidence (earlier uncommitted tree, not this commit): 452 I/O tests passed, 2 ignored, with 32 MiB thread stacks; layers passed for 31 crates; wasm passed for 24 crates plus codecs HEIF. The earlier full I/O run aborted on a Krita stack overflow with the default stack; the larger-stack rerun passed. A corpus run began but completion was not established.
 
